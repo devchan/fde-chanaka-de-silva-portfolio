@@ -26,8 +26,8 @@ export default function ContactPage() {
           <aside className="space-y-4">
             {[
               { icon: Mail, label: "Email", value: site.email, href: `mailto:${site.email}` },
-              { icon: LinkedinIcon, label: "LinkedIn", value: "linkedin.com/in/chanakadesilva", href: site.linkedin },
-              { icon: GithubIcon, label: "GitHub", value: "github.com/chanakadesilva", href: site.github },
+              { icon: LinkedinIcon, label: "LinkedIn", value: "linkedin.com/in/chanakakasun", href: site.linkedin },
+              { icon: GithubIcon, label: "GitHub", value: "github.com/devchan", href: site.github },
               { icon: MapPin, label: "Location", value: "Colombo, Sri Lanka / Remote", href: null },
             ].map((item) => {
               const Icon = item.icon;

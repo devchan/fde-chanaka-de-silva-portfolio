@@ -7,8 +7,8 @@ export const site = {
   title: "Senior Software Engineer",
   url: siteUrl,
   email: "chanakadesilva31@gmail.com",
-  github: "https://github.com/chanakadesilva",
-  linkedin: "https://www.linkedin.com/in/chanakadesilva",
+  github: "https://github.com/devchan",
+  linkedin: "https://www.linkedin.com/in/chanakakasun",
   resumeUrl: `${basePath}/resume/chanaka-de-silva-resume.pdf`,
   tagline:
     "Building enterprise AI platforms, mission-critical integrations, and distributed systems that ship.",
