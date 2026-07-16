@@ -1,6 +1,8 @@
 import { blogPosts } from "@/data/blog";
 import { site } from "@/data/site";
 
+export const dynamic = "force-static";
+
 function escapeXml(value: string) {
   return value
     .replaceAll("&", "&amp;")

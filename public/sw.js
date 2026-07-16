@@ -1,9 +1,13 @@
 const CACHE_NAME = "chanaka-portfolio-v1";
-const OFFLINE_URLS = ["/", "/projects", "/architecture", "/ai-lab", "/contact"];
+const OFFLINE_PATHS = ["", "projects/", "architecture/", "ai-lab/", "contact/"];
+
+function scopedUrl(path) {
+  return new URL(path, self.registration.scope).toString();
+}
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
-    caches.open(CACHE_NAME).then((cache) => cache.addAll(OFFLINE_URLS))
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(OFFLINE_PATHS.map(scopedUrl)))
   );
   self.skipWaiting();
 });
@@ -29,6 +33,10 @@ self.addEventListener("fetch", (event) => {
         caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
         return response;
       })
-      .catch(() => caches.match(event.request).then((cached) => cached || caches.match("/")))
+      .catch(() =>
+        caches
+          .match(event.request)
+          .then((cached) => cached || caches.match(scopedUrl("")))
+      )
   );
 });

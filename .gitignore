@@ -26,6 +26,8 @@
 .idea/
 .playwright-mcp/
 portfolio-*.png
+github-pages-*.png
+static-export-console*.log
 
 # debug
 npm-debug.log*

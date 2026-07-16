@@ -4,31 +4,33 @@ import { Send } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input, Textarea } from "@/components/ui/input";
+import { site } from "@/data/site";
 
-type Status = "idle" | "sending" | "sent" | "error";
+type Status = "idle" | "opened";
 
 export function ContactForm() {
   const [status, setStatus] = useState<Status>("idle");
 
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setStatus("sending");
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(form));
+    const subject = encodeURIComponent(
+      `Portfolio contact from ${String(data.name ?? "Visitor")}`
+    );
+    const body = encodeURIComponent(
+      [
+        `Name: ${String(data.name ?? "")}`,
+        `Email: ${String(data.email ?? "")}`,
+        `Company: ${String(data.company ?? "")}`,
+        "",
+        String(data.message ?? ""),
+      ].join("\n")
+    );
 
-    const response = await fetch("/api/contact", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(data),
-    });
-
-    if (response.ok) {
-      setStatus("sent");
-      form.reset();
-      return;
-    }
-
-    setStatus("error");
+    window.location.href = `mailto:${site.email}?subject=${subject}&body=${body}`;
+    setStatus("opened");
+    form.reset();
   }
 
   return (
@@ -66,19 +68,13 @@ export function ContactForm() {
         type="submit"
         variant="gradient"
         className="mt-5"
-        disabled={status === "sending"}
       >
         <Send className="h-4 w-4" />
-        {status === "sending" ? "Sending..." : "Send message"}
+        Send message
       </Button>
-      {status === "sent" && (
+      {status === "opened" && (
         <p className="mt-4 text-sm text-emerald-500">
-          Message received. I will reply by email.
-        </p>
-      )}
-      {status === "error" && (
-        <p className="mt-4 text-sm text-red-500">
-          The form could not submit. Email works directly from this page.
+          Your email client has been opened with the message details.
         </p>
       )}
     </form>

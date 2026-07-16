@@ -6,6 +6,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { site } from "@/data/site";
 import { GithubIcon, LinkedinIcon } from "@/components/ui/brand-icons";
+import { publicPath } from "@/lib/paths";
 
 const container = {
   hidden: {},
@@ -133,7 +134,7 @@ export function Hero() {
           className="mt-16 w-full rounded-lg border border-card-border shadow-2xl shadow-cyan-500/10"
         >
           <Image
-            src="/images/platform-console.svg"
+            src={publicPath("/images/platform-console.svg")}
             alt="Enterprise AI platform console showing workflows, system health, traces, and retrieval evidence"
             width={1200}
             height={760}

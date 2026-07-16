@@ -2,6 +2,7 @@ import Link from "next/link";
 import { Mail, Rss } from "lucide-react";
 import { GithubIcon, LinkedinIcon } from "@/components/ui/brand-icons";
 import { navLinks, site } from "@/data/site";
+import { publicPath } from "@/lib/paths";
 
 export function Footer() {
   return (
@@ -44,7 +45,7 @@ export function Footer() {
               <Mail className="h-4 w-4" />
             </a>
             <a
-              href="/rss.xml"
+              href={publicPath("/rss.xml")}
               aria-label="RSS feed"
               className="flex h-9 w-9 items-center justify-center rounded-full border border-card-border bg-surface text-muted transition-colors hover:text-foreground"
             >

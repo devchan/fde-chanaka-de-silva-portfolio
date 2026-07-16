@@ -1,11 +1,15 @@
+const siteUrl =
+  process.env.NEXT_PUBLIC_SITE_URL ?? "https://chanakadesilva.dev";
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
+
 export const site = {
   name: "Chanaka De Silva",
   title: "Senior Software Engineer",
-  url: "https://chanakadesilva.dev",
+  url: siteUrl,
   email: "chanakadesilva31@gmail.com",
   github: "https://github.com/chanakadesilva",
   linkedin: "https://www.linkedin.com/in/chanakadesilva",
-  resumeUrl: "/resume/chanaka-de-silva-resume.pdf",
+  resumeUrl: `${basePath}/resume/chanaka-de-silva-resume.pdf`,
   tagline:
     "Building enterprise AI platforms, mission-critical integrations, and distributed systems that ship.",
   description:
