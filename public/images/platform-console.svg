@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760" role="img" aria-labelledby="title desc">
+  <title id="title">Enterprise AI platform console</title>
+  <desc id="desc">Dark dashboard illustration with workflow, trace, and architecture panels.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#071017"/>
+      <stop offset="0.54" stop-color="#0a1020"/>
+      <stop offset="1" stop-color="#06120f"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" x2="1">
+      <stop stop-color="#22d3ee"/>
+      <stop offset="0.55" stop-color="#818cf8"/>
+      <stop offset="1" stop-color="#34d399"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="14" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="1200" height="760" rx="34" fill="url(#bg)"/>
+  <path d="M0 142h1200M0 296h1200M0 450h1200M0 604h1200M170 0v760M340 0v760M510 0v760M680 0v760M850 0v760M1020 0v760" stroke="#fff" stroke-opacity=".045"/>
+  <rect x="70" y="72" width="1060" height="616" rx="24" fill="#0b1220" fill-opacity=".72" stroke="#fff" stroke-opacity=".12"/>
+  <rect x="102" y="112" width="298" height="220" rx="16" fill="#0f172a" stroke="#fff" stroke-opacity=".1"/>
+  <rect x="432" y="112" width="326" height="220" rx="16" fill="#0f172a" stroke="#fff" stroke-opacity=".1"/>
+  <rect x="790" y="112" width="308" height="220" rx="16" fill="#0f172a" stroke="#fff" stroke-opacity=".1"/>
+  <rect x="102" y="366" width="468" height="280" rx="16" fill="#0f172a" stroke="#fff" stroke-opacity=".1"/>
+  <rect x="602" y="366" width="496" height="280" rx="16" fill="#0f172a" stroke="#fff" stroke-opacity=".1"/>
+  <text x="126" y="154" fill="#e5e7eb" font-family="Inter,Arial" font-size="24" font-weight="700">Mission Console</text>
+  <text x="456" y="154" fill="#e5e7eb" font-family="Inter,Arial" font-size="24" font-weight="700">Agent Workflow</text>
+  <text x="814" y="154" fill="#e5e7eb" font-family="Inter,Arial" font-size="24" font-weight="700">System Health</text>
+  <text x="126" y="408" fill="#e5e7eb" font-family="Inter,Arial" font-size="24" font-weight="700">Architecture Trace</text>
+  <text x="626" y="408" fill="#e5e7eb" font-family="Inter,Arial" font-size="24" font-weight="700">Retrieval Evidence</text>
+  <g fill="#22d3ee" filter="url(#glow)">
+    <circle cx="530" cy="224" r="18"/>
+    <circle cx="612" cy="224" r="18"/>
+    <circle cx="694" cy="224" r="18"/>
+  </g>
+  <path d="M548 224h46M630 224h46" stroke="url(#accent)" stroke-width="4" stroke-linecap="round"/>
+  <path d="M144 206h212M144 246h178M144 286h228" stroke="#94a3b8" stroke-opacity=".55" stroke-width="12" stroke-linecap="round"/>
+  <path d="M826 212h216M826 252h164M826 292h238" stroke="#34d399" stroke-opacity=".55" stroke-width="12" stroke-linecap="round"/>
+  <path d="M142 470h82l62 54 76-88 68 106 92-122" fill="none" stroke="url(#accent)" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <g fill="#111827" stroke="#fff" stroke-opacity=".14">
+    <rect x="632" y="458" width="410" height="34" rx="8"/>
+    <rect x="632" y="516" width="350" height="34" rx="8"/>
+    <rect x="632" y="574" width="382" height="34" rx="8"/>
+  </g>
+  <g fill="#94a3b8" font-family="JetBrains Mono,monospace" font-size="14">
+    <text x="652" y="480">source: policy/manuals/security.md</text>
+    <text x="652" y="538">retrieval: hybrid + rerank, score 0.91</text>
+    <text x="652" y="596">guardrail: cite evidence before action</text>
+  </g>
+</svg>
