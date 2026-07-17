@@ -2,6 +2,110 @@ import type { ProjectCaseStudy } from "@/lib/types";
 
 export const projects: ProjectCaseStudy[] = [
   // -------------------------------------------------------------------------
+  // Enterprise AI Invoice Processing Platform (personal production-grade build)
+  // -------------------------------------------------------------------------
+  {
+    slug: "enterprise-ai-invoice-platform",
+    title: "Enterprise AI Invoice Processing Platform",
+    tagline:
+      "A multi-tenant platform that ingests invoices, extracts structured data with AI, validates against business rules, auto-approves the confident cases and routes the rest to human reviewers — all behind a complete audit trail, similarity search, and an in-app AI assistant.",
+    category: "AI & ML",
+    featured: true,
+    year: "2026",
+    role: "Architect & Sole Engineer",
+    stack: [
+      "Python",
+      "FastAPI",
+      "PostgreSQL",
+      "pgvector",
+      "Redis",
+      "OpenAI",
+      "Gemini",
+      "React",
+      "TypeScript",
+      "Docker",
+      "Kubernetes",
+      "Terraform",
+      "MCP",
+      "GitHub Actions",
+    ],
+    metrics: [
+      { label: "Automated tests", value: "154" },
+      { label: "REST endpoints", value: "30" },
+      { label: "Dependency CVEs", value: "0" },
+      { label: "Readiness score", value: "9.0/10" },
+    ],
+    sections: {
+      businessProblem: [
+        "Accounts-payable teams still key invoices in by hand: a person opens a PDF, copies the supplier, number, dates, totals, and line items into a system, eyeballs it against a PO or a budget, and files it away. It is slow, it is inconsistent between clerks, and the audit trail is whatever someone remembered to note. The obvious fix — point an LLM at the document — trades one problem for a worse one, because a model that is confidently wrong on a tax total is more dangerous than a slow human who double-checks.",
+        "I built this as a personal, production-grade reference platform to answer the question a Forward Deployed Engineer actually gets asked on-site: how do you put AI extraction into a money-handling workflow without losing the controls — tenant isolation, human review, auditability — that make the workflow trustworthy in the first place? The goal was not a demo; it was a system I would be comfortable handing to an enterprise as the starting point for a pilot.",
+      ],
+      architecture: [
+        "The platform is five planes: a React reviewer cockpit, an ingress/edge layer, a FastAPI application tier with a separate queue worker, a PostgreSQL 16 + pgvector data tier with Redis and object storage, and an observability plane. Upload is synchronous and returns immediately after persisting the invoice and enqueuing a job; the worker does AI extraction out-of-band, so a slow model call never blocks the request path.",
+        "Extraction runs against OpenAI or Gemini under a strict JSON schema with per-field confidence scores, and falls back to a deterministic dev extractor when no API key is present so the whole stack runs offline. Every extraction stores its prompt version, model name, and token/cost usage. Extracted invoices are embedded with text-embedding-3-small and written to a pgvector HNSW index, which powers both org-scoped similar-invoice search and near-duplicate detection.",
+        "After extraction, a validation engine applies business rules and writes reviewer-facing explanations, an anomaly pass flags supplier-amount outliers and near-duplicates, and a confidence-gated auto-approval step lets touchless invoices through only when the full validation and anomaly checks pass and both overall and per-field confidence clear a 0.92 bar. Everything else lands in the human review queue. A shared, tenant-scoped, read-only tool layer is exposed two ways: as a stdio MCP server and as an in-app tool-calling AP assistant.",
+      ],
+      systemDesign: [
+        "Tenant isolation as an invariant: every tenant-owned row carries an organization_id, and every query is scoped to the authenticated principal's org — cross-tenant reads resolve to 404, not 403, so the surface never confirms another tenant's IDs.",
+        "Append-only audit log enforced at the ORM layer: before_update and before_delete raise, so history cannot be rewritten even by application bugs.",
+        "Optimistic concurrency on review submission via expected_updated_at, surfacing a distinct 'updated by someone else' conflict instead of a silent lost update.",
+        "Confidence-gated auto-approval with a single kill-switch (AUTO_APPROVAL_ENABLED) and a distinct audit action, so the touchless path is always attributable and instantly reversible.",
+        "AI cost levers built in: model tiering with low-confidence escalation, embedding reuse for identical source text, pre-extraction image downscaling, and a cap on few-shot examples drawn only from the org's own approved invoices.",
+        "One tool layer, two front doors: the MCP server and the assistant share the same seven tenant-scoped read-only tools, so authorization is enforced once regardless of how the tools are called.",
+      ],
+      responsibilities: [
+        "Designed the whole system end to end — data model, request lifecycle, deployment topology, threat model, and SLOs — and built every layer solo.",
+        "Implemented the FastAPI backend: 30 REST endpoints, the Redis-backed worker, AI extraction and embedding services, validation and anomaly engines, and the auth/RBAC/tenant-isolation core.",
+        "Built the React cockpit: a responsive master-detail review queue, header-field corrections, approve/reject with optimistic concurrency, a similar-invoices panel over the pgvector endpoint, and a global tool-tracing AI assistant.",
+        "Wrote the agent layer: a shared read-only tool set surfaced as both an MCP server and an in-app tool-calling assistant with a deterministic keyless fallback.",
+        "Set up the delivery pipeline: multi-stage non-root images, Docker Compose for dev/staging/prod, Kubernetes manifests (kustomize base + overlays, HPA, migration job), a Terraform skeleton, and GitHub Actions CI running ruff, tsc, Vitest, pip-audit, and the full Docker test suite.",
+        "Authored the published architecture documentation: layered system view, ER model, STRIDE threat model, SLOs, and deployment topology.",
+      ],
+      challenges: [
+        {
+          title: "Trusting an AI decision with money",
+          description:
+            "Auto-approval is where an extraction mistake becomes a paid invoice. Rather than a single confidence number, I gated it on the conjunction of a full validation pass, an anomaly-detection pass, and both overall and per-field confidence clearing a conservative 0.92 threshold, with a distinct audit action and a one-flag kill-switch. The thresholds ship deliberately conservative — tuning them on real invoice data is an explicit, documented step, not an assumption baked in.",
+        },
+        {
+          title: "Bounding prompt-injection blast radius",
+          description:
+            "Invoice content is attacker-controlled text fed to an LLM. I bounded the blast radius structurally: strict JSON schemas with extra=forbid, few-shot examples drawn only from the org's own approved invoices, and a natural-language search that emits filter JSON rather than SQL. The agent tools are read-only and tenant-scoped, so even a successful injection cannot mutate state or cross tenants.",
+        },
+        {
+          title: "Making the whole stack runnable without an API key",
+          description:
+            "A reference platform nobody can run is useless. Every AI dependency — extraction, embeddings, and the assistant — has a deterministic fallback, so the full workflow, tests, and CI run offline; the live provider path is wired but optional. This kept the 154-test suite fast and hermetic while still exercising the real extraction, validation, and review pipeline.",
+        },
+      ],
+      implementation: [
+        "The backend is FastAPI on Starlette with SQLAlchemy and Alembic migrations that run on every containerized boot. Auth uses PBKDF2-SHA256 (390k iterations) password hashing with HS256 tokens delivered in httpOnly cookies, refresh-token rotation, and Redis-backed revocation; login and upload are rate-limited through a distributed Redis sliding window. File downloads go through short-lived HMAC-signed URLs against private storage.",
+        "Observability is first-class: Prometheus metrics including request-duration histograms for p95/p99, opt-in OpenTelemetry tracing across FastAPI, SQLAlchemy, and Redis, structured JSON logs correlated by X-Request-ID, liveness and readiness probes, and an importable Grafana dashboard. AI-specific counters track auto-approvals, anomaly flags, field corrections, and cost.",
+        "The whole thing is documented as a browsable architecture view published via GitHub Pages, covering the system planes, the 13-table ER model, the request lifecycle and sequence, the Kubernetes deployment topology, the SLO/observability inventory, and a STRIDE threat model with residual risks stated plainly rather than hidden.",
+      ],
+      results: [
+        "154 backend tests pass across tenant isolation, auth, rate limiting, the AI pipeline, and the agent layer; CI is green on main with backend dependencies CVE-clean under a blocking pip-audit gate.",
+        "30 REST endpoints back a full reviewer cockpit, an MCP server, and an in-app AI assistant over one shared tenant-scoped read-only tool layer.",
+        "Self-assessed 9.0/10 production readiness, with the remaining path (live-cluster deployment, hosted telemetry, provider verification, threshold tuning) documented item by item rather than glossed over.",
+        "The confidence-gated auto-approval path turns the confident majority of invoices touchless while preserving a complete, append-only audit trail and human review for everything uncertain.",
+        "Published, executive-level architecture documentation (system design, ER model, STRIDE threat model, SLOs, deployment topology) that doubles as the artifact an FDE would walk a customer through.",
+      ],
+      lessonsLearned: [
+        "AI in a money workflow is a controls problem, not a model problem: the schema, the confidence gate, the audit log, and the human queue are what make extraction shippable.",
+        "A deterministic fallback for every AI dependency is worth building on day one — it keeps tests hermetic, CI fast, and the whole system demoable without spending a cent on tokens.",
+        "Exposing one tool layer through both MCP and an in-app assistant proves that agent surfaces are just another client of your API, and that authorization has to live below them, not in them.",
+        "Documenting what is not done — unstubbed provider verification, untuned thresholds, no hosted telemetry yet — earns more trust than a scorecard that claims 10/10.",
+      ],
+      futureImprovements: [
+        "Stand up a live hosted staging cluster and a hosted Prometheus/Grafana/OTel backend to measure SLO attainment against real telemetry.",
+        "Run extraction against live OpenAI/Gemini with representative invoice fixtures and tune the auto-approval, anomaly, and near-duplicate thresholds on that data.",
+        "Add double-submit CSRF tokens as defense-in-depth alongside the existing SameSite=Lax cookies, and extend audit coverage to per-rule validation outcomes.",
+        "Broaden end-to-end and accessibility coverage and add line-item correction UX, which currently trails header-field correction.",
+      ],
+    },
+  },
+
+  // -------------------------------------------------------------------------
   // 1. Enterprise Property Technology Platform
   // -------------------------------------------------------------------------
   {
