@@ -1,6 +1,5 @@
 const siteUrl =
   process.env.NEXT_PUBLIC_SITE_URL ?? "https://chanakadesilva.dev";
-const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? "";
 
 export const site = {
   name: "Chanaka De Silva",
@@ -9,7 +8,9 @@ export const site = {
   email: "chanakadesilva31@gmail.com",
   github: "https://github.com/devchan",
   linkedin: "https://www.linkedin.com/in/chanakakasun",
-  resumeUrl: `${basePath}/resume/chanaka-de-silva-resume.pdf`,
+  // next/link prepends the configured basePath automatically; don't add it here
+  // or GitHub Pages ends up with a doubled prefix and a 404.
+  resumeUrl: `/resume/chanaka-de-silva-resume.pdf`,
   tagline:
     "Building enterprise AI platforms, mission-critical integrations, and distributed systems that ship.",
   description:
@@ -59,6 +60,15 @@ export const navLinks = [
   { href: "/resume", label: "Resume" },
   { href: "/contact", label: "Contact" },
 ] as const;
+
+// Home-page section visibility. Editable in the admin; these are the seed
+// defaults used for the static (GitHub Pages) baseline and as the fallback when
+// no stored config exists.
+export const features = {
+  stats: true,
+  techMarquee: true,
+  githubGraph: true,
+} as const;
 
 export const technologies = [
   "PHP",
