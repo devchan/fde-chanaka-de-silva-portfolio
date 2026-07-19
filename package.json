@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "build:pages": "GITHUB_PAGES=true NEXT_PUBLIC_GITHUB_PAGES=true NEXT_PUBLIC_BASE_PATH=/fde-chanaka-de-silva-portfolio NEXT_PUBLIC_SITE_URL=https://devchan.github.io/fde-chanaka-de-silva-portfolio next build",
+    "build:pages": "GITHUB_PAGES=true NEXT_PUBLIC_GITHUB_PAGES=true NEXT_PUBLIC_BASE_PATH= NEXT_PUBLIC_SITE_URL=https://chanakadesilva.dev next build",
     "start": "next start",
     "lint": "eslint",
     "docker:build": "docker compose build portfolio",
