@@ -489,6 +489,99 @@ export const blogPosts: BlogPost[] = [
       },
     ],
   },
+  {
+    slug: "what-a-forward-deployed-engineer-actually-does",
+    title: "What a Forward Deployed Engineer Actually Does",
+    description:
+      "The FDE role is having a moment, and most descriptions of it are wrong. Field notes on living in the customer's environment, closing the feedback loop, and building the product's argument in code.",
+    date: "2026-07-20",
+    readingTime: "9 min read",
+    category: "Engineering",
+    tags: ["Forward Deployed Engineer", "Product Engineering", "Customer Success", "Integrations", "Careers"],
+    content: [
+      {
+        type: "p",
+        text: "The demo lands. The customer nods, says the right things, and signs. Six weeks later the deployment is stalled — not because the product is wrong, but because their data lives in a shape nobody anticipated, their security team has three questions no slide answered, and the one workflow that would prove the value crosses a system your product has never heard of. Someone has to go sit inside that mess and make the value real. That someone is a forward deployed engineer.",
+      },
+      {
+        type: "p",
+        text: "The title is having a moment — Palantir coined it, OpenAI and a wave of AI startups made it fashionable, and now every job board has a dozen FDE listings that mean a dozen different things. Having done the work across enterprise SaaS deployments, most descriptions I read get it wrong. It's not a fancy solutions engineer, it's not a sales-adjacent demo builder, and it's not a support role with a better title. Here's what the job actually is.",
+      },
+      { type: "h2", text: "The title describes a location, not a seniority" },
+      {
+        type: "p",
+        text: "\"Forward deployed\" is a military metaphor, and it's the right one. It means you operate at the edge, in the customer's environment, far from the comfort of your own codebase and your own assumptions. The defining constraint isn't the difficulty of the code — it's the distance from home. You're writing software against systems you didn't build, data you didn't model, and constraints you learn about the day they block you. A senior engineer who has only ever worked on their own product isn't automatically an FDE; the skill that transfers is operating with confidence where you don't control the ground.",
+      },
+      {
+        type: "p",
+        text: "This is why the role is genuinely hard and genuinely senior. You need to be strong enough as an engineer to build production systems, and comfortable enough with ambiguity to do it while the requirements are still forming in a room full of people who don't agree with each other yet. Most engineering roles remove ambiguity before you're asked to code. The FDE codes into the ambiguity.",
+      },
+      { type: "h2", text: "You are the product's argument, made specific" },
+      {
+        type: "p",
+        text: "A product makes a general promise: \"we do X for companies like you.\" The customer has a specific reality that the general promise doesn't quite fit. The FDE's job is to close that gap in code — to turn \"this could work for you\" into \"this is working, look.\" Usually the first and hardest gap is data. The product wants a clean canonical shape; the customer has fifteen years of a CRM that three acquisitions passed through. You meet them where they are by building the adapter, not by asking them to change.",
+      },
+      {
+        type: "code",
+        lang: "ts",
+        code: "// The product wants a canonical Account. The customer has... this.\n// An FDE writes the boundary so the product never learns how weird the source is.\ninterface CanonicalAccount {\n  id: string;\n  name: string;\n  tier: \"enterprise\" | \"mid\" | \"smb\";\n  ownerEmail: string;\n  renewalDate: string | null;\n}\n\nfunction adaptLegacyAccount(row: LegacyCrmRow): CanonicalAccount {\n  return {\n    // Their \"ACCT_ID\" is numeric in one table, prefixed in another.\n    id: String(row.ACCT_ID ?? row.acct_key).replace(/^CUST-/, \"\"),\n    name: (row.COMPANY_NM || row.dba_name || \"Unknown\").trim(),\n    // Tier lives in a free-text field three admins have filled inconsistently.\n    tier: normalizeTier(row.SEGMENT),\n    ownerEmail: row.AE_EMAIL?.toLowerCase() ?? \"unassigned@customer.example\",\n    // \"12/31/25\", \"2025-12-31\", and \"\" all appear in the same column.\n    renewalDate: parseFuzzyDate(row.RENEWAL),\n  };\n}\n// This file is the deployment. Everything downstream assumes clean input\n// because one place — here, at the edge — earned that assumption.",
+      },
+      {
+        type: "p",
+        text: "That file is unglamorous and it is the entire job in miniature. The product team gets to assume clean canonical input because an FDE stood at the boundary and absorbed the customer's reality so the core product didn't have to. Do this well and the deployment succeeds without the product accumulating a hundred customer-specific special cases. Do it badly — by pushing the mess inward — and you've traded one deployment for permanent tax on every future one.",
+      },
+      { type: "h2", text: "The feedback loop is the whole job" },
+      {
+        type: "p",
+        text: "Here's the part that separates an FDE from a very good consultant: you are not just delivering a solution, you are a sensor. You are the only person who watches a real user hit the real product on real data, and that observation is worth more than any amount of internal roadmap speculation. The consultant ships the deliverable and leaves. The FDE ships the deliverable and then carries back the three things that would make the next ten deployments trivial.",
+      },
+      {
+        type: "ul",
+        items: [
+          "The workaround you had to write twice is a missing product feature — file it with the code, not a vague anecdote.",
+          "The question the security team asked that you couldn't answer is a gap in the product's story, not just this deal.",
+          "The integration you hand-rolled for one customer is probably the connector three others will need next quarter.",
+          "The thing that took six weeks and should have taken six days is where the product's onboarding is silently bleeding.",
+          "Every custom line you wrote is a hypothesis: either it becomes product, or it becomes debt you personally maintain forever.",
+        ],
+      },
+      {
+        type: "p",
+        text: "The best FDE work makes itself unnecessary. You solve a customer's problem with custom code, then you fight to move the reusable 80% of that code into the core product so the next FDE — maybe you — never writes it again. An FDE who hoards bespoke solutions builds job security and a maintenance nightmare in equal measure. An FDE who systematically converts field learnings into product is how a company goes from ten painful deployments to a hundred smooth ones.",
+      },
+      {
+        type: "quote",
+        text: "A forward deployed engineer's real deliverable isn't the customer's deployment. It's the product change that makes the next deployment easier.",
+      },
+      { type: "h3", text: "Which is why the reporting line matters" },
+      {
+        type: "p",
+        text: "Put FDEs under sales and they become expensive demo engineers optimizing for the close. Put them under support and they become senior firefighters optimizing for ticket volume. The role only works when the feedback loop has teeth — when what an FDE learns in the field actually redirects the roadmap. The organizations that get real leverage out of FDEs treat them as the product team's forward observers, not the sales team's closers.",
+      },
+      { type: "h2", text: "What breaks forward deployed engineers" },
+      {
+        type: "p",
+        text: "The failure modes are specific and worth naming, because they're where good engineers burn out. The first is losing the thread between custom and core: you say yes to every customer request, ship a snowflake per account, and eighteen months in you're the only human who understands any of it. The second is the opposite — being so protective of the product's purity that you can't meet a real customer where they are, and the deployment dies of principle. The job lives in the tension between those two, and staying in that tension is emotionally harder than any algorithm.",
+      },
+      {
+        type: "p",
+        text: "The third is isolation. You're physically or organizationally away from your own engineering team, absorbing customer pressure directly, often the sole technical voice in rooms full of stakeholders. Without a deliberate connection back home — regular syncs, shared context, colleagues who've seen the same patterns — you drift, and drift is how the feedback loop quietly breaks. The customer sees a responsive engineer; the product never hears a thing.",
+      },
+      {
+        type: "quote",
+        text: "Say yes to everything and you become a maintenance liability. Say no to everything and the deployment dies. The whole craft is knowing which request is really a product feature wearing a customer's clothes.",
+      },
+      { type: "h2", text: "Why the role is having a moment" },
+      {
+        type: "p",
+        text: "AI made this role suddenly central, and the reason is structural. The gap between an impressive demo and a deployed system that a real enterprise trusts has never been wider — a model that dazzles in a sandbox has to be wired into messy data, governed by a nervous security team, and shaped around a workflow no product manager has ever seen. That gap is exactly the FDE's home turf. The companies winning enterprise AI aren't the ones with the best benchmark scores; they're the ones who can put an engineer in the customer's environment and make the value undeniable in six weeks instead of six quarters.",
+      },
+      {
+        type: "p",
+        text: "For engineers, it's one of the most complete roles going: you write production code, you own real customer outcomes, you see your work land in front of actual users, and you have a direct line to shaping the product. The trade is that you carry the ambiguity and the customer pressure yourself. If that sounds like a tax, this isn't your role. If it sounds like the interesting part, you might already be a forward deployed engineer — you just don't have the title yet.",
+      },
+    ],
+  },
 ];
 
 export function getPost(slug: string): BlogPost | undefined {
