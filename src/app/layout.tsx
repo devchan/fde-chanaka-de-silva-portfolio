@@ -6,6 +6,7 @@ import { CommandPalette } from "@/components/layout/command-palette";
 import { ScrollProgress } from "@/components/layout/scroll-progress";
 import { PwaRegister } from "@/components/layout/pwa-register";
 import { PageTransition } from "@/components/motion/page-transition";
+import { JsonLd } from "@/components/seo/json-ld";
 import { site } from "@/data/site";
 import "./globals.css";
 
@@ -22,7 +23,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   metadataBase: new URL(site.url),
   title: {
-    default: `${site.name} — ${site.title} | Forward Deployed Engineer`,
+    default: `${site.name} — ${site.title} & AI Consultant`,
     template: `%s | ${site.name}`,
   },
   description: site.description,
@@ -40,13 +41,13 @@ export const metadata: Metadata = {
     siteName: site.name,
     title: `${site.name} — ${site.title}`,
     description: site.description,
-    images: [{ url: "/opengraph-image", width: 1200, height: 630 }],
+    // og:image is supplied by the file-based app/opengraph-image.tsx (and
+    // per-route opengraph-image.tsx overrides), which also drives twitter:image.
   },
   twitter: {
     card: "summary_large_image",
     title: `${site.name} — ${site.title}`,
     description: site.description,
-    images: ["/opengraph-image"],
   },
   robots: {
     index: true,
@@ -64,20 +65,56 @@ export const viewport: Viewport = {
   ],
 };
 
-const personJsonLd = {
+const personId = `${site.url}/#person`;
+const websiteId = `${site.url}/#website`;
+
+const siteJsonLd = {
   "@context": "https://schema.org",
-  "@type": "Person",
-  name: site.name,
-  jobTitle: site.title,
-  email: `mailto:${site.email}`,
-  url: site.url,
-  sameAs: [site.github, site.linkedin],
-  knowsAbout: [
-    "Artificial Intelligence",
-    "Distributed Systems",
-    "Enterprise Architecture",
-    "Cloud Computing",
-    "Software Engineering",
+  "@graph": [
+    {
+      "@type": "Person",
+      "@id": personId,
+      name: site.name,
+      jobTitle: site.title,
+      description: site.description,
+      email: `mailto:${site.email}`,
+      url: site.url,
+      image: `${site.url}/opengraph-image`,
+      sameAs: [site.github, site.linkedin],
+      knowsAbout: [
+        "Forward Deployed Engineering",
+        "Enterprise AI",
+        "Retrieval-Augmented Generation (RAG)",
+        "AI Agents",
+        "Model Context Protocol (MCP)",
+        "Distributed Systems",
+        "Solution Architecture",
+        "Cloud Computing",
+        "Software Engineering",
+      ],
+      hasOccupation: {
+        "@type": "Occupation",
+        name: "Forward Deployed Engineer",
+        occupationalCategory: "15-1252.00",
+      },
+    },
+    {
+      "@type": "WebSite",
+      "@id": websiteId,
+      url: site.url,
+      name: `${site.name} — ${site.title}`,
+      description: site.description,
+      inLanguage: "en",
+      publisher: { "@id": personId },
+    },
+    {
+      "@type": "ProfilePage",
+      "@id": `${site.url}/#profilepage`,
+      url: site.url,
+      name: `${site.name} — ${site.title} & AI Consultant`,
+      isPartOf: { "@id": websiteId },
+      about: { "@id": personId },
+    },
   ],
 };
 
@@ -96,10 +133,7 @@ export default function RootLayout({
     >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeScript }} />
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(personJsonLd) }}
-        />
+        <JsonLd data={siteJsonLd} />
       </head>
       <body className="flex min-h-full flex-col">
         <a

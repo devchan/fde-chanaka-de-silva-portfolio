@@ -4,6 +4,7 @@ import { ArrowLeft, ArrowRight, CheckCircle2 } from "lucide-react";
 import { notFound } from "next/navigation";
 import { DiagramRenderer } from "@/components/diagrams/diagram-renderer";
 import { MetricGrid } from "@/components/shared/metric-grid";
+import { JsonLd } from "@/components/seo/json-ld";
 import { PageHero } from "@/components/shared/page-hero";
 import { Badge } from "@/components/ui/badge";
 import { Section } from "@/components/ui/section";
@@ -27,12 +28,15 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return {
     title: project.title,
     description: project.tagline,
+    keywords: project.stack,
+    authors: [{ name: site.name, url: site.url }],
     alternates: { canonical: `/projects/${project.slug}` },
     openGraph: {
       title: `${project.title} | ${site.name}`,
       description: project.tagline,
       type: "article",
       url: `/projects/${project.slug}`,
+      tags: project.stack,
     },
   };
 }
@@ -55,8 +59,34 @@ export default async function ProjectDetailPage({ params }: Props) {
 
   const diagram = project.diagramId ? getDiagram(project.diagramId) : undefined;
 
+  const projectUrl = `${site.url}/projects/${project.slug}`;
+  const creativeWorkJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "CreativeWork",
+    name: project.title,
+    headline: project.title,
+    description: project.tagline,
+    url: projectUrl,
+    image: `${projectUrl}/opengraph-image`,
+    datePublished: project.year,
+    author: { "@type": "Person", name: site.name, url: site.url },
+    keywords: project.stack.join(", "),
+    about: project.category,
+    inLanguage: "en",
+  };
+  const breadcrumbJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: site.url },
+      { "@type": "ListItem", position: 2, name: "Projects", item: `${site.url}/projects` },
+      { "@type": "ListItem", position: 3, name: project.title, item: projectUrl },
+    ],
+  };
+
   return (
     <>
+      <JsonLd data={[creativeWorkJsonLd, breadcrumbJsonLd]} />
       <PageHero
         eyebrow={`${project.category} / ${project.year}`}
         title={project.title}

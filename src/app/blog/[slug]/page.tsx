@@ -3,6 +3,7 @@ import Link from "next/link";
 import { ArrowLeft } from "lucide-react";
 import { notFound } from "next/navigation";
 import { ContentRenderer } from "@/components/shared/content-renderer";
+import { JsonLd } from "@/components/seo/json-ld";
 import { PageHero } from "@/components/shared/page-hero";
 import { Badge } from "@/components/ui/badge";
 import { Section } from "@/components/ui/section";
@@ -26,12 +27,19 @@ export async function generateMetadata({ params }: Props): Promise<Metadata> {
   return {
     title: post.title,
     description: post.description,
+    keywords: post.tags,
+    authors: [{ name: site.name, url: site.url }],
     alternates: { canonical: `/blog/${post.slug}` },
     openGraph: {
       type: "article",
       title: `${post.title} | ${site.name}`,
       description: post.description,
+      url: `/blog/${post.slug}`,
       publishedTime: post.date,
+      modifiedTime: post.date,
+      authors: [site.name],
+      section: post.category,
+      tags: post.tags,
     },
   };
 }
@@ -41,8 +49,36 @@ export default async function BlogPostPage({ params }: Props) {
   const post = getPost(slug);
   if (!post) notFound();
 
+  const postUrl = `${site.url}/blog/${post.slug}`;
+  const articleJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BlogPosting",
+    headline: post.title,
+    description: post.description,
+    datePublished: post.date,
+    dateModified: post.date,
+    author: { "@type": "Person", name: site.name, url: site.url },
+    publisher: { "@type": "Person", name: site.name, url: site.url },
+    mainEntityOfPage: { "@type": "WebPage", "@id": postUrl },
+    url: postUrl,
+    image: `${postUrl}/opengraph-image`,
+    keywords: post.tags.join(", "),
+    articleSection: post.category,
+    inLanguage: "en",
+  };
+  const breadcrumbJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    itemListElement: [
+      { "@type": "ListItem", position: 1, name: "Home", item: site.url },
+      { "@type": "ListItem", position: 2, name: "Blog", item: `${site.url}/blog` },
+      { "@type": "ListItem", position: 3, name: post.title, item: postUrl },
+    ],
+  };
+
   return (
     <>
+      <JsonLd data={[articleJsonLd, breadcrumbJsonLd]} />
       <PageHero
         eyebrow={`${post.category} / ${formatDate(post.date)}`}
         title={post.title}

@@ -3,7 +3,7 @@ const siteUrl =
 
 export const site = {
   name: "Chanaka De Silva",
-  title: "Senior Software Engineer",
+  title: "Forward Deployed Engineer",
   url: siteUrl,
   email: "chanakadesilva31@gmail.com",
   github: "https://github.com/devchan",
@@ -14,19 +14,21 @@ export const site = {
   tagline:
     "Building enterprise AI platforms, mission-critical integrations, and distributed systems that ship.",
   description:
-    "Senior Software Engineer with 11+ years of experience building enterprise SaaS products, CRM platforms, workflow automation, cloud integrations, distributed applications, AI-powered solutions, and scalable backend architectures.",
+    "Forward Deployed Engineer and consultant with 11+ years building enterprise AI, RAG and agent systems, mission-critical integrations, and distributed systems that ship. Available for consulting engagements.",
   keywords: [
     "Forward Deployed Engineer",
-    "Senior Software Engineer",
-    "Staff Software Engineer",
+    "Forward Deployed Engineer consultant",
+    "AI consultant",
     "AI Solutions Engineer",
     "Solutions Architect",
-    "Enterprise AI",
+    "Enterprise AI consulting",
     "RAG",
     "AI Agents",
     "LangGraph",
     "MCP",
     "Distributed Systems",
+    "Senior Software Engineer",
+    "Staff Software Engineer",
     "Laravel",
     "Next.js",
     "Kubernetes",
