@@ -1,4 +1,4 @@
-const CACHE_NAME = "chanaka-portfolio-v1";
+const CACHE_NAME = "chanaka-portfolio-v2";
 const OFFLINE_PATHS = ["", "projects/", "architecture/", "ai-lab/", "contact/"];
 
 function scopedUrl(path) {
@@ -29,8 +29,13 @@ self.addEventListener("fetch", (event) => {
   event.respondWith(
     fetch(event.request)
       .then((response) => {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        // Only cache successful, cacheable responses. Caching errors (e.g. a
+        // GitHub Pages 404 during an outage) poisons the cache and the SW then
+        // serves the stale error even after the site recovers.
+        if (response.ok && response.type === "basic") {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then((cache) => cache.put(event.request, copy));
+        }
         return response;
       })
       .catch(() =>

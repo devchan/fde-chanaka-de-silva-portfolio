@@ -69,13 +69,26 @@ export type BlogCategory =
   | "Engineering"
   | "Developer Productivity";
 
+/** One stage in a learning/career roadmap infographic. */
+export interface RoadmapPhase {
+  /** Short step marker, e.g. "01". */
+  step: string;
+  /** Phase name, e.g. "Engineering Foundations". */
+  title: string;
+  /** One-line description of what this phase is about. */
+  focus: string;
+  /** Skills / topics to learn in this phase, rendered as chips. */
+  skills: string[];
+}
+
 export type ContentBlock =
   | { type: "p"; text: string }
   | { type: "h2"; text: string }
   | { type: "h3"; text: string }
   | { type: "ul"; items: string[] }
   | { type: "code"; lang: string; code: string }
-  | { type: "quote"; text: string };
+  | { type: "quote"; text: string }
+  | { type: "roadmap"; title?: string; phases: RoadmapPhase[] };
 
 export interface BlogPost {
   slug: string;

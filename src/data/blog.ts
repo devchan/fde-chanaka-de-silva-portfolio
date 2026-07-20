@@ -495,7 +495,7 @@ export const blogPosts: BlogPost[] = [
     description:
       "The FDE role is having a moment, and most descriptions of it are wrong. Field notes on living in the customer's environment, closing the feedback loop, and building the product's argument in code.",
     date: "2026-07-20",
-    readingTime: "9 min read",
+    readingTime: "11 min read",
     category: "Engineering",
     tags: ["Forward Deployed Engineer", "Product Engineering", "Customer Success", "Integrations", "Careers"],
     content: [
@@ -557,6 +557,90 @@ export const blogPosts: BlogPost[] = [
       {
         type: "p",
         text: "Put FDEs under sales and they become expensive demo engineers optimizing for the close. Put them under support and they become senior firefighters optimizing for ticket volume. The role only works when the feedback loop has teeth — when what an FDE learns in the field actually redirects the roadmap. The organizations that get real leverage out of FDEs treat them as the product team's forward observers, not the sales team's closers.",
+      },
+      { type: "h2", text: "The toolkit is long because your surface area is the whole stack" },
+      {
+        type: "p",
+        text: "People see the skills list for this role and read it as gatekeeping. It isn't — it's a description of the blast radius. A backend engineer needs to know their own stack; a forward deployed engineer needs to know enough of the customer's stack to be dangerous in it, because you don't get to choose what the deployment touches. Here's how I'd group what actually matters and why each cluster earns its place in the field, rather than as one intimidating column.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Languages and system design — Python, Go, or Rust, distributed systems, and APIs (REST, GraphQL, gRPC). You write production glue against systems you didn't design, and you're often the only engineer who'll read it before it ships. The code has to be good on the first pass, not the third review.",
+          "Data and state — SQL, PostgreSQL, Redis, and vector stores like pgvector, Qdrant, or Milvus. The customer's data is the first wall every deployment hits; in AI deployments the vector database is where 'it works on our data' is actually won or lost.",
+          "Infrastructure and deployment — Docker, Kubernetes, Terraform, a cloud (AWS, Azure, or GCP), CI/CD with GitHub Actions, and real Linux, networking, and debugging fluency. 'Forward deployed' often means literally shipping inside their cloud, behind their firewall, under their compliance rules — you meet the environment as it is, not as your docs assume it is.",
+          "The AI layer — LLMs, RAG, and agents; MCP, A2A, and tool calling; orchestration with LangGraph or the OpenAI Agents SDK. This is the product you're now deploying, and the gap between a demo agent and one an enterprise will trust in production is precisely the FDE's job.",
+          "Operating in production — observability (OpenTelemetry, Prometheus, Grafana), incident response, and performance and cost management. You own the outcome after go-live, and until the monitoring is real the outcome is a guess.",
+          "Security and trust — OAuth and authentication, secrets handling, and a working command of the OWASP Top 10 (injection, broken access control, SSRF, and the rest). The customer's security team is the gate every enterprise deployment must clear, and in an AI deployment they'll also ask about prompt injection and data exfiltration through the model — you answer those with concrete controls, not reassurance.",
+        ],
+      },
+      {
+        type: "p",
+        text: "And then the two items on that list that don't look technical and matter most: customer discovery and solution architecture, and technical writing and documentation. The engineers who plateau as FDEs are almost never the ones who couldn't learn Kubernetes — they're the ones who could build anything but couldn't figure out what to build, or built the right thing and couldn't write it down so the customer and the product team both understood it. Everything above is table stakes. Translating a vague business problem into a system, and a field learning into a document someone actually acts on, is the craft that separates the role from senior engineering-at-a-distance.",
+      },
+      {
+        type: "roadmap",
+        title: "The forward deployed engineer roadmap",
+        phases: [
+          {
+            step: "01",
+            title: "Engineering Foundations",
+            focus: "Be a strong builder before you're deployed anywhere.",
+            skills: [
+              "Python / Go / Rust",
+              "System design & distributed systems",
+              "APIs — REST, GraphQL, gRPC",
+              "Linux, networking & debugging",
+            ],
+          },
+          {
+            step: "02",
+            title: "Data & Infrastructure",
+            focus: "Ship inside the customer's environment, not a sandbox.",
+            skills: [
+              "SQL, PostgreSQL & Redis",
+              "Docker, Kubernetes & Terraform",
+              "AWS / Azure / GCP",
+              "CI/CD & GitHub Actions",
+            ],
+          },
+          {
+            step: "03",
+            title: "The AI Layer",
+            focus: "This is the product you're actually deploying now.",
+            skills: [
+              "LLMs, RAG & AI agents",
+              "MCP, A2A & tool calling",
+              "LangGraph / OpenAI Agents SDK",
+              "Vector DBs — pgvector, Qdrant, Milvus",
+            ],
+          },
+          {
+            step: "04",
+            title: "Production & Trust",
+            focus: "Own the outcome after go-live and clear the security gate.",
+            skills: [
+              "Observability — OpenTelemetry, Prometheus, Grafana",
+              "Cybersecurity & OWASP Top 10",
+              "Security, OAuth & authentication",
+              "Production incident response",
+              "Performance & cost management",
+            ],
+          },
+          {
+            step: "05",
+            title: "The Differentiators",
+            focus: "The non-code skills that decide who plateaus.",
+            skills: [
+              "Customer discovery & solution architecture",
+              "Technical writing & documentation",
+            ],
+          },
+        ],
+      },
+      {
+        type: "quote",
+        text: "You can learn any single item on that list in a month. What takes years is knowing which three of them the customer in front of you actually needs — and having the taste to leave the rest out.",
       },
       { type: "h2", text: "What breaks forward deployed engineers" },
       {
