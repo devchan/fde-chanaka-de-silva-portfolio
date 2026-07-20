@@ -67,10 +67,10 @@ export function Footer() {
         </nav>
 
         <div className="text-sm text-muted">
-          <p className="font-medium text-foreground">Open to opportunities</p>
+          <p className="font-medium text-foreground">Available for consulting engagements</p>
           <p className="mt-2 leading-relaxed">
-            Forward Deployed Engineer · Staff Engineer · AI Solutions Engineer ·
-            Solutions Architect
+            Forward Deployed Engineering · Enterprise AI · Solution Architecture ·
+            System Design
           </p>
           <a
             href={`mailto:${site.email}`}
