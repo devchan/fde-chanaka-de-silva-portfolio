@@ -65,6 +65,7 @@ export type BlogCategory =
   | "System Design"
   | "Distributed Systems"
   | "Cloud"
+  | "Security"
   | "Architecture"
   | "Engineering"
   | "Developer Productivity";
