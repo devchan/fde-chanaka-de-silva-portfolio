@@ -5452,6 +5452,147 @@ export const blogPosts: BlogPost[] = [
       },
     ],
   },
+  {
+    slug: "realtime-websockets-presence-and-fanout",
+    title: "WebSockets at Scale: Connections, Presence, and Fan-out",
+    description:
+      "Long-lived connections break the assumptions a request/response stack is built on. The four things that actually matter: connection budget, deploys, presence semantics, and the fan-out that quietly melts your broker.",
+    date: "2026-09-17",
+    readingTime: "9 min read",
+    category: "System Design",
+    tags: ["Realtime", "WebSockets", "Pub/Sub", "Scaling", "System Design"],
+    content: [
+      {
+        type: "p",
+        text: "A realtime feature is the easiest thing in the world to demo and one of the more awkward things to operate. You open a socket, push a JSON message, a number on the dashboard ticks up, and everybody is pleased. Then it meets a few thousand concurrent users on unreliable networks, and you find that every assumption the rest of your stack is built on — stateless workers, rolling deploys, autoscaling on CPU — quietly stopped holding.",
+      },
+      {
+        type: "p",
+        text: "I have shipped realtime into enterprise products twice: a live operations dashboard for field teams, and an in-app notification and collaboration layer. Both times the hard parts were the same four, and not one of them was the WebSocket protocol.",
+      },
+      { type: "h2", text: "A connection is state, and state changes how you deploy" },
+      {
+        type: "p",
+        text: "An HTTP request lives for eighty milliseconds. A socket lives for hours. That single difference moves your capacity ceiling from CPU to memory and file descriptors: budget somewhere between ten and forty kilobytes per connection once you count send buffers and per-connection application state, and fifty thousand connections is suddenly a real number on a real machine. Autoscaling on CPU is actively wrong here — a node can be at eight percent CPU and completely full. Scale on connection count, and set the pod limit from measured memory per connection rather than hope.",
+      },
+      {
+        type: "p",
+        text: "Scale-in is the sharper edge. Removing a pod disconnects everyone on it, so an aggressive scale-in policy manufactures the exact reconnect storm you are trying to avoid. The same applies to deploys: every deploy of the connection layer is a mass reconnect event, and if all clients come back in the same second you will DDoS your own authentication endpoint. Two things fix it. Drain slowly — close connections in batches over several minutes with a close code the client understands as 'come back later'. And mandate jittered exponential backoff on the client, because a reconnect loop with no jitter is a synchronised herd by construction.",
+      },
+      {
+        type: "p",
+        text: "The structural fix is to deploy the connection layer separately from the application. Business logic ships several times a day; the gateway that holds sockets should ship when the gateway changes. Coupling them means every routine deploy churns every connection in the product.",
+      },
+      { type: "h2", text: "Fan-out is where the cost actually lives" },
+      {
+        type: "p",
+        text: "Publishing one message to a channel with N members is N deliveries, and that multiplication is the thing that breaks. The naive architecture has every gateway node subscribed to every channel, filtering locally — which means every node pays the full firehose regardless of who it is actually serving. It works beautifully at ten nodes and one thousand channels, and falls over at the point where the product becomes successful.",
+      },
+      {
+        type: "p",
+        text: "Two changes carried us a long way. First, a gateway node subscribes upstream only to the channels for which it currently holds a local connection, and unsubscribes when the last one goes. Second, coalesce: buffer events per connection and flush once per tick rather than writing a frame per event. A fifty millisecond window is invisible to users and collapsed our busiest dashboard from roughly forty frames a second per client to twenty, with a matching drop in syscalls and egress. The tick loop is also the natural place to handle slow consumers, which otherwise accumulate unbounded buffers until the node dies.",
+      },
+      {
+        type: "code",
+        lang: "ts",
+        code: "// A gateway node subscribes upstream only to channels it actually holds,\n// and coalesces bursts into one frame per tick.\nconst CHANNELS = new Map<string, Set<Connection>>();\nconst TICK_MS = 50;\n\nasync function subscribe(conn: Connection, channel: string) {\n  let members = CHANNELS.get(channel);\n  if (!members) {\n    members = new Set();\n    CHANNELS.set(channel, members);\n    await broker.subscribe(channel); // first local member: subscribe upstream\n  }\n  members.add(conn);\n}\n\nbroker.on('message', (channel: string, event: Event) => {\n  for (const conn of CHANNELS.get(channel) ?? []) {\n    conn.pending.push(event); // buffer, do not write yet\n  }\n});\n\nsetInterval(() => {\n  for (const conn of connections) {\n    if (conn.pending.length === 0) continue;\n    if (conn.socket.bufferedAmount > BACKPRESSURE_LIMIT) {\n      // Slow consumer: drop the buffer, make it resync from its cursor.\n      conn.pending.length = 0;\n      conn.send({ type: 'resync', from: conn.lastSeq });\n      continue;\n    }\n    conn.send({ type: 'batch', events: conn.pending.splice(0) });\n  }\n}, TICK_MS);",
+      },
+      { type: "h2", text: "Presence is an approximation, so bound it explicitly" },
+      {
+        type: "ul",
+        items: [
+          "Presence is eventually consistent by nature. A phone that walks into a lift is indistinguishable from a client that is simply quiet, so heartbeat and expire: refresh a key every fifteen seconds, expire it at forty-five, and tell product that 'online' means 'seen in the last forty-five seconds'. Agreeing that sentence early prevents a lot of bug reports that are not bugs.",
+          "Keep presence in an expiring in-memory store, never in a database row you write on every heartbeat. Ten thousand users at four heartbeats a minute is a sustained write load whose only purpose is a green dot.",
+          "Reference-count per user, not per connection. The same person has a laptop, a phone and three tabs; presence goes away when the last connection does, and a naive implementation flickers every time a tab closes.",
+          "Debounce presence fan-out separately and more aggressively than message fan-out. Nobody needs sub-second accuracy on a roster, and joins and leaves in a busy channel generate far more traffic than the actual content.",
+          "Make reconnect cheap and idempotent. A client returning should resubscribe and ask for everything after a cursor, not trigger a full state dump for every channel it was in.",
+        ],
+      },
+      { type: "h2", text: "Missed messages are the requirement nobody writes down" },
+      {
+        type: "p",
+        text: "The socket is a delivery optimisation, not a source of truth. Networks drop, nodes restart, mobile clients suspend. If the only path by which a change reaches the screen is an open socket, then every blip is silent data loss, and users respond exactly as you would expect: they stop trusting the screen and start refreshing it, which is the feature failing in the most expensive way possible.",
+      },
+      {
+        type: "p",
+        text: "The fix is boring and mandatory. Give every channel a monotonic sequence number, have the client persist the last sequence it processed, and expose an HTTP endpoint that returns everything after a cursor. On reconnect the client sends its cursor; if the gap is small the server replays it, and if the gap is beyond the retention window the server says so and the client refetches the underlying resource over REST. That protocol is perhaps two hundred lines, and it turns the socket back into what it should be — a latency improvement over polling, with the correctness guarantee living underneath it.",
+      },
+      {
+        type: "quote",
+        text: "The socket is an optimisation. If the feature is only correct while the socket is open, it is not a feature, it is a demo.",
+      },
+      {
+        type: "p",
+        text: "One last piece of pragmatism: use a managed service or an off-the-shelf server until you have a specific reason not to. Nothing interesting about your product lives in the WebSocket frame parser. The engineering that actually differentiates is the sequencing protocol, the presence semantics you agreed with product, and the shape of your fan-out — and all three are yours to design regardless of who terminates the connection.",
+      },
+    ],
+  },
+  {
+    slug: "model-routing-and-provider-fallback",
+    title: "Model Routing and Fallback: Not Betting the Product on One Provider",
+    description:
+      "Outages, price changes, and models that shift under a stable name are operational facts. What a routing layer has to do — and the ways a naive fallback makes reliability worse rather than better.",
+    date: "2026-09-18",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["LLM", "Reliability", "Model Routing", "Cost", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "Three things happen to every LLM feature that stays in production long enough. The provider has a bad hour. The pricing or the rate limits change. And the model behind a name you have been calling for six months behaves slightly differently one morning. None of the three involves you, and all three land on your on-call rotation.",
+      },
+      {
+        type: "p",
+        text: "The reaction I want to argue against is the heavy abstraction layer — the interface so generic that you cannot use any provider's actually useful features, written by a team that will support exactly one provider forever. What you want instead is thin and specific: a routing decision per task, pinned versions, an eval suite that gates changes, and a failure policy that degrades rather than amplifies.",
+      },
+      { type: "h2", text: "Route by task, not by a global default" },
+      {
+        type: "p",
+        text: "The common shape is one model constant imported everywhere, which means classification, extraction, summarisation and multi-step reasoning all run on whatever the team picked for the hardest of those jobs. That is the single largest source of avoidable spend in most LLM features I have looked at, and it is also a latency problem: a routing call that gates a user interaction does not need a frontier model to decide between six intents.",
+      },
+      {
+        type: "p",
+        text: "Declare the route per task in configuration rather than scattering model names through the code. On one product, moving classification and first-pass summarisation to a small model cut inference spend by about sixty percent with no measurable change in quality. The important half of that sentence is 'no measurable' — it was only knowable because an eval set existed for both tasks. Without one, that change is a guess you make on a Friday and discover was wrong through support tickets.",
+      },
+      { type: "h2", text: "Fallback that does not make things worse" },
+      {
+        type: "p",
+        text: "The naive version is a try/except that retries on a second provider. It fails in four ways, and each one shows up precisely when you are already having a bad day: you double the user's latency because the fallback only starts after a sixty second timeout has expired; every client retries simultaneously and the retry traffic becomes its own outage; the alternate model returns something your downstream schema validation rejects, so the fallback produces an error with extra steps; and the cost of the incident is invisible until the invoice.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Hedge rather than only failing over. For latency-sensitive calls, start the secondary at the primary's p95 rather than at its timeout, take the first valid response, and cancel the loser. Failing over after a sixty second timeout means the user has already waited sixty seconds before the retry even begins.",
+          "Circuit-break per provider, not per request. Once the error rate for a provider crosses a threshold, route away from it for a cooldown so that requests stop paying failure latency one at a time before doing the useful thing.",
+          "Only fall back within a validated tier. The alternate has to pass the same eval suite and emit the same structured schema. A fallback you have never evaluated is not resilience — it is an untested branch that executes only during incidents.",
+          "Give the fallback a budget. Cap hedges and retries at a small fraction of total requests, say ten percent, so that a provider outage degrades the feature instead of multiplying your bill by the number of providers you configured.",
+          "Make the non-determinism observable. Tag every response with model, version, route reason, whether it hedged, latency, tokens and cost. Without that, 'the outputs were different last Tuesday' is an unanswerable question.",
+        ],
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "ROUTES = {\n    'classify':   ['small-fast', 'small-alt'],\n    'extract':    ['small-fast', 'frontier'],\n    'synthesise': ['frontier', 'frontier-alt'],\n}\n\nasync def complete(task: str, prompt: str, *, hedge_after: float, deadline: float):\n    candidates = [m for m in ROUTES[task] if breakers[m].allows()]\n    if not candidates:\n        raise NoHealthyModel(task)\n\n    attempts = [asyncio.create_task(call(candidates[0], prompt, timeout=deadline))]\n\n    # Hedge at the primary's p95, not at its timeout. Waiting for the timeout\n    # before starting the alternate is how a slow provider becomes an outage.\n    done, pending = await asyncio.wait(attempts, timeout=hedge_after)\n    if not done and len(candidates) > 1 and budget.allow_hedge():\n        attempts.append(asyncio.create_task(call(candidates[1], prompt, timeout=deadline)))\n        done, pending = await asyncio.wait(attempts, return_when=asyncio.FIRST_COMPLETED)\n\n    for task_ in pending:\n        task_.cancel()\n\n    result = first_schema_valid(done)   # an unparseable win is not a win\n    breakers[result.model].record(ok=True)\n    emit('llm.call', route=task, model=result.model, version=result.version,\n         hedged=len(attempts) > 1, latency_ms=result.latency_ms,\n         cost_usd=result.cost_usd)\n    return result",
+      },
+      { type: "h2", text: "Pin the version and treat a model change as a dependency upgrade" },
+      {
+        type: "p",
+        text: "Where a provider offers dated or pinned identifiers, use them. An alias that silently moves is an unannounced deploy into the middle of your product, made by somebody who has never seen your prompts. You would not let a library upgrade itself in production on the vendor's schedule, and a model is a far more behaviourally sensitive dependency than most libraries.",
+      },
+      {
+        type: "p",
+        text: "Then make the upgrade a real process, because it is one. Run the eval suite against the candidate. Shadow it on a sample of live traffic and diff the outputs on the metrics that matter for the task — schema validity, groundedness, refusal rate, latency, cost — not on vibes from ten examples. Roll it forward behind a flag with the old version one config change away. The whole loop takes an afternoon once it exists, and it is the difference between adopting a better model deliberately and finding out about it from a customer.",
+      },
+      {
+        type: "quote",
+        text: "A fallback path you have never evaluated is not resilience. It is an untested branch that only ever executes during an incident.",
+      },
+      {
+        type: "p",
+        text: "None of this is large. A route table in config, pinned versions, an eval suite in CI, a circuit breaker, a budgeted hedge, and structured telemetry on every call — a few hundred lines in total, and most of it is the boring reliability engineering you would apply to any third-party dependency in the request path. Skip it and your product's availability is defined, exactly and entirely, by somebody else's status page.",
+      },
+    ],
+  },
 ];
 
 export function getPost(slug: string): BlogPost | undefined {
