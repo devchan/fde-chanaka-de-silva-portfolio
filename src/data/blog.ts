@@ -6213,6 +6213,3461 @@ export const blogPosts: BlogPost[] = [
       },
     ],
   },
+  {
+    slug: "human-in-the-loop-agents-approvals-checkpoints-undo",
+    title: "Human-in-the-Loop Agents: Approvals, Checkpoints, and Undo",
+    description:
+      "An agent that can act needs a way for a person to say 'not yet'. Designing approval gates, durable checkpoints and real undo so autonomy grows with trust instead of ahead of it.",
+    date: "2026-10-01",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["AI Agents", "LLM", "Workflow", "Production AI", "UX"],
+    content: [
+      {
+        type: "p",
+        text: "The demo agent books the meeting, emails the customer and updates the CRM in one fluent run. The production agent does the same thing to the wrong customer, and nobody notices until the reply arrives. Once an agent can take actions with side effects, the question stops being 'is the model good enough?' and becomes 'what happens when it is wrong, and who gets to stop it?'.",
+      },
+      {
+        type: "p",
+        text: "Human-in-the-loop is often bolted on as a confirmation dialog at the end. That is the weakest version. A useful design decides which actions need approval, pauses the run durably while a person decides, and gives everyone a way to reverse what already happened. Those are three separate mechanisms, and agents that skip any one of them tend to lose their autonomy the first time something goes wrong.",
+      },
+      { type: "h2", text: "Classify actions before you gate them" },
+      {
+        type: "p",
+        text: "Not every tool call deserves a human. Asking for approval on every read trains people to click 'approve' without looking, which is worse than no gate at all. Sort the agent's tools by blast radius and reversibility, and attach a policy to each class rather than to each call.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Read-only actions — searching records, fetching documents, drafting text — run freely. They cost tokens, not trust.",
+          "Reversible internal writes — creating a draft, tagging a ticket, updating a field with history — run automatically but are logged with enough detail to undo.",
+          "External or irreversible actions — sending an email, issuing a refund, deleting data, calling a partner API — pause for approval, with the exact payload shown to the approver.",
+          "Bulk actions above a threshold — fifty updates instead of one — pause regardless of class, because a small error multiplied is a large one.",
+          "Anything touching money, permissions or personal data defaults to approval until the evidence says otherwise, and that evidence should be reviewed eval results, not optimism.",
+        ],
+      },
+      { type: "h2", text: "Checkpoints that survive a restart" },
+      {
+        type: "p",
+        text: "An approval can take minutes or days. Holding an agent loop in memory while a manager is on leave does not work: the worker restarts, the deployment rolls, and the context is gone. The run needs to be persisted as state — the conversation so far, the pending tool call, its arguments and the policy that paused it — so that approval resumes exactly where it stopped. The approver also needs to see what the agent intends to do, not a summary written by the agent about what it intends to do.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "from dataclasses import dataclass, asdict\nimport hashlib, json\n\n@dataclass\nclass PendingAction:\n    run_id: str\n    step: int\n    tool: str\n    args: dict\n    policy: str\n\n    def fingerprint(self) -> str:\n        payload = json.dumps({'tool': self.tool, 'args': self.args}, sort_keys=True)\n        return hashlib.sha256(payload.encode()).hexdigest()\n\ndef execute_step(run, action: PendingAction, store, tools):\n    if action.policy == 'needs_approval':\n        approval = store.get_approval(action.run_id, action.step)\n        if approval is None:\n            store.save_checkpoint(run, asdict(action))\n            return 'paused'\n        # Reject approvals given for a different payload.\n        if approval.fingerprint != action.fingerprint():\n            raise ValueError('approved payload does not match pending action')\n    result = tools[action.tool](**action.args, idempotency_key=f'{action.run_id}:{action.step}')\n    store.record_effect(action.run_id, action.step, action.tool, action.args, result)\n    return result",
+      },
+      {
+        type: "p",
+        text: "Two details in that sketch matter more than they look. The fingerprint ties an approval to a specific payload, so an approval for 'refund 20' cannot be replayed against a resumed run that now says 'refund 2000'. The idempotency key means that if the worker dies after the tool call but before recording the result, the retry does not send the email twice.",
+      },
+      { type: "h2", text: "Undo is a feature, not an apology" },
+      {
+        type: "p",
+        text: "Every write an agent makes should be recorded as an effect with enough information to reverse it: the previous value, the record identifier, and the compensating action. For internal data that is usually straightforward. For external actions it often is not — you cannot unsend an email — which is precisely why those sit behind approval. Where a true undo is impossible, offer the nearest thing: a follow-up correction, a cancellation within a grace window, or a delayed send that a person can stop.",
+      },
+      {
+        type: "p",
+        text: "Expose undo at the level of the run, not just the step. When an agent misreads a request and makes twelve changes, the user wants to revert 'that run', in reverse order, with a report of anything that could not be reversed. Building that later is painful; recording effects from day one makes it a query.",
+      },
+      {
+        type: "quote",
+        text: "Autonomy is not a setting you switch on. It is a track record you earn one approved action at a time.",
+      },
+      {
+        type: "p",
+        text: "Start with tighter gates than you think you need, measure how often approvers change or reject the proposed action, and loosen a policy only when the rejection rate for that action class is consistently low. Persist every pause, bind every approval to a payload, and record every effect with its inverse. Do that and the agent can earn more freedom over time; skip it and the first serious mistake will take its freedom away entirely.",
+      },
+    ],
+  },
+  {
+    slug: "throttling-laravel-jobs-against-third-party-api-quotas",
+    title: "Throttling Laravel Jobs Against Third-Party API Quotas",
+    description:
+      "Queue workers are fast; partner APIs are not. Using rate-limited middleware, release with backoff and per-account keys so Laravel jobs respect external quotas instead of burning them in the first minute.",
+    date: "2026-10-02",
+    readingTime: "8 min read",
+    category: "Laravel",
+    tags: ["Laravel", "Queues", "Rate Limiting", "Integrations", "Redis"],
+    content: [
+      {
+        type: "p",
+        text: "A sync job that works perfectly with one worker falls over the day someone scales the queue to twenty. Each worker politely calls the CRM, the payment provider or the shipping API, and together they exceed the quota in seconds. The provider starts returning 429s, the jobs retry immediately, the retries make it worse, and eventually every attempt is exhausted and the jobs land in failed_jobs with nothing actually wrong with them.",
+      },
+      {
+        type: "p",
+        text: "The root cause is that the limit lives outside your system but the concurrency lives inside it. Laravel gives you the tools to coordinate — rate limiters backed by Redis, job middleware, release with delay — but you have to wire them around the external quota rather than around your own throughput.",
+      },
+      { type: "h2", text: "Model the quota you actually have" },
+      {
+        type: "p",
+        text: "Read the provider's documentation carefully and write down the real shape of the limit. Is it per API key, per connected account, or per endpoint? Is it a fixed window or a rolling one? Do write endpoints have a lower ceiling than reads? A multi-tenant integration where each customer connects their own account usually has a limit per customer token, which means one busy tenant should not slow down the others. Get the key wrong and you either throttle everyone together or exceed the limit for one account while the rest sit idle.",
+      },
+      {
+        type: "p",
+        text: "Leave headroom. If the provider allows 100 requests per minute, plan for something like 80. Other parts of your system — a webhook handler, an admin action, a manual retry — share that budget, and clocks between you and the provider are never perfectly aligned.",
+      },
+      { type: "h2", text: "Rate-limited job middleware" },
+      {
+        type: "p",
+        text: "Laravel's RateLimited job middleware releases a job back onto the queue when the named limiter is exhausted, instead of running it. Define the limiter in a service provider, keyed on the account whose quota you are spending.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "// AppServiceProvider::boot()\nRateLimiter::for('crm-api', function (SyncContactToCrm $job) {\n    return Limit::perMinute(80)->by('crm:'.$job->connection->external_account_id);\n});\n\nfinal class SyncContactToCrm implements ShouldQueue\n{\n    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;\n\n    public int $tries = 0;          // attempts are bounded by retryUntil instead\n    public int $maxExceptions = 3;  // real errors still fail the job\n\n    public function __construct(public CrmConnection $connection, public int $contactId) {}\n\n    public function middleware(): array\n    {\n        return [new RateLimited('crm-api')];\n    }\n\n    public function retryUntil(): DateTime\n    {\n        return now()->addHours(6);\n    }\n\n    public function handle(CrmClient $crm): void\n    {\n        $response = $crm->for($this->connection)->upsertContact($this->contactId);\n\n        if ($response->status() === 429) {\n            $this->release((int) $response->header('Retry-After', 60));\n            return;\n        }\n\n        $response->throw();\n    }\n}",
+      },
+      {
+        type: "p",
+        text: "The important part is separating throttling from failure. A job that was released because the limiter said no has not failed, so counting it against a small $tries value is how healthy jobs end up in failed_jobs. Using retryUntil with a generous window plus maxExceptions keeps the distinction: throttled jobs wait, genuinely broken ones still fail after a few real exceptions.",
+      },
+      { type: "h2", text: "When the provider pushes back anyway" },
+      {
+        type: "ul",
+        items: [
+          "Respect Retry-After when the provider sends it. Your limiter is an estimate; the provider's header is the truth.",
+          "Isolate integration jobs on their own queue with a fixed number of workers, so a backlog of throttled CRM syncs never delays password-reset emails.",
+          "Coalesce work before it hits the queue. Ten updates to the same contact in a minute should become one sync job, using ShouldBeUnique or a 'dirty since' timestamp the job reads when it runs.",
+          "Prefer bulk endpoints where they exist. One batch call for a hundred records spends one unit of quota instead of a hundred.",
+          "Alert on queue age, not just failures. A throttled queue that is twelve hours behind is an incident even if nothing has technically failed.",
+        ],
+      },
+      {
+        type: "quote",
+        text: "Your queue can scale horizontally. Someone else's API cannot. Design for the narrower pipe.",
+      },
+      {
+        type: "p",
+        text: "Treat every third-party quota as shared, scarce infrastructure: key the limiter to the account that owns the quota, release rather than fail when you hit it, honour the provider's own signals, and reduce the number of calls before you try to schedule them better. Do that and scaling workers becomes a way to drain backlogs faster, not a way to get your API key suspended.",
+      },
+    ],
+  },
+  {
+    slug: "noisy-neighbours-fair-queuing-per-tenant-limits",
+    title: "Noisy Neighbours: Fair Queuing and Per-Tenant Limits",
+    description:
+      "In a shared multi-tenant system one customer's import can starve everyone else. Fair queuing, per-tenant concurrency caps and admission control that keep the platform predictable for all tenants.",
+    date: "2026-10-03",
+    readingTime: "9 min read",
+    category: "System Design",
+    tags: ["Multi-Tenancy", "Queues", "Rate Limiting", "Scalability", "SaaS"],
+    content: [
+      {
+        type: "p",
+        text: "A shared platform is cheap to run until one tenant uploads a million-row import, triggers a reindex and starts hammering the API from a script, all on the same morning. Nothing is broken. Every other customer simply sees their reports take twenty minutes, their webhooks arrive late and their dashboard time out. From their point of view the product is down.",
+      },
+      {
+        type: "p",
+        text: "This is the noisy neighbour problem, and a single first-in-first-out queue is the most common way to create it. FIFO is fair to jobs, not to customers. If one tenant enqueues fifty thousand jobs, the next tenant's one job waits behind all of them. Fairness has to be designed in at the points where tenants compete: queues, API capacity, database connections and expensive background work.",
+      },
+      { type: "h2", text: "Fair queuing instead of one long line" },
+      {
+        type: "p",
+        text: "The simplest effective pattern is a queue per tenant (or per tenant bucket) and a dispatcher that takes work round-robin across non-empty queues. A tenant with fifty thousand jobs gets one turn, then a tenant with one job gets one turn. Large tenants still finish — they just do not monopolise capacity while doing it. If customers pay for different tiers, use weighted round-robin so a premium tenant gets more turns, but never all of them.",
+      },
+      {
+        type: "p",
+        text: "Thousands of physical queues are awkward in most brokers, so in practice teams implement this as a scheduling layer: jobs land in a table or Redis sorted set keyed by tenant, and a small dispatcher moves a bounded number per tenant into the worker queue each cycle.",
+      },
+      { type: "h2", text: "Concurrency caps per tenant" },
+      {
+        type: "p",
+        text: "Round-robin decides order; a concurrency cap decides how much of the fleet one tenant can hold at once. Even with fair ordering, if one tenant's jobs each take ten minutes, they can still occupy every worker. A per-tenant semaphore stops that.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "import redis, time\n\nr = redis.Redis()\nMAX_PER_TENANT = 4\nLEASE_SECONDS = 900\n\nACQUIRE = r.register_script('''\nlocal key, now, lease, limit = KEYS[1], tonumber(ARGV[1]), tonumber(ARGV[2]), tonumber(ARGV[3])\nredis.call('ZREMRANGEBYSCORE', key, '-inf', now)          -- drop expired leases\nif redis.call('ZCARD', key) >= limit then return 0 end\nredis.call('ZADD', key, now + lease, ARGV[4])\nreturn 1\n''')\n\ndef try_acquire(tenant_id: str, job_id: str) -> bool:\n    key = f'tenant:{tenant_id}:running'\n    return bool(ACQUIRE(keys=[key], args=[time.time(), LEASE_SECONDS, MAX_PER_TENANT, job_id]))\n\ndef release(tenant_id: str, job_id: str) -> None:\n    r.zrem(f'tenant:{tenant_id}:running', job_id)",
+      },
+      {
+        type: "p",
+        text: "Using leases with an expiry rather than a plain counter matters: a worker that crashes mid-job would otherwise leak a slot forever, and the tenant would slowly lose all their capacity. A job that cannot acquire a slot goes back to the tenant's queue rather than blocking a worker.",
+      },
+      { type: "h2", text: "The other shared resources" },
+      {
+        type: "ul",
+        items: [
+          "API rate limits keyed by tenant, not just by IP or user, so one integration script cannot consume the whole edge capacity. Return 429 with Retry-After and document the limits.",
+          "Statement timeouts and result limits on tenant-driven queries. A report filter that scans the whole events table is a noisy neighbour inside the database.",
+          "Separate pools for interactive and batch work. Exports, imports and reindexes run on workers that cannot starve request handling or transactional email.",
+          "Per-tenant usage metrics — jobs enqueued, CPU seconds, rows scanned — so you can see who is noisy before support tickets tell you.",
+          "A deliberate escape hatch for very large tenants: dedicated workers or a separate shard when their volume makes sharing unfair in either direction.",
+        ],
+      },
+      {
+        type: "quote",
+        text: "First-in-first-out is fair to messages. Your customers are not messages.",
+      },
+      {
+        type: "p",
+        text: "Fairness rarely appears in the first architecture diagram because early on every tenant is small. Add it before the first large customer arrives: queue by tenant, cap concurrency with leases, limit at the edge per tenant, and measure usage per tenant. The goal is not to punish heavy users — it is to make sure their success never becomes everyone else's outage.",
+      },
+    ],
+  },
+  {
+    slug: "session-token-security-refresh-rotation-revocation-logout",
+    title: "Session and Token Security: Refresh Rotation, Revocation, Real Logout",
+    description:
+      "Short-lived access tokens are only half a design. Refresh token rotation, reuse detection, server-side revocation and a logout that actually ends the session across devices.",
+    date: "2026-10-04",
+    readingTime: "9 min read",
+    category: "Security",
+    tags: ["Authentication", "JWT", "OAuth", "Sessions", "Security"],
+    content: [
+      {
+        type: "p",
+        text: "Many applications have a logout button that deletes a token from local storage and redirects to the login page. The token itself is still valid. Anyone who copied it — a malicious browser extension, a leaked log line, a shared laptop — can keep using it until it expires, and if refresh tokens never expire, that may be never. The user believes they logged out; the system does not agree.",
+      },
+      {
+        type: "p",
+        text: "Stateless tokens are attractive because the API can verify them without a database lookup. The price is that you cannot easily take them back. Good session design accepts that trade for short-lived access tokens and puts the state, and therefore the control, in the refresh layer.",
+      },
+      { type: "h2", text: "Short access, rotating refresh" },
+      {
+        type: "p",
+        text: "Keep access tokens short — minutes, not days — so a stolen one has a small window. Pair them with refresh tokens that are opaque, stored server-side as a hash, and rotated on every use: each refresh issues a new refresh token and invalidates the previous one. All tokens descended from one login share a family identifier, which is what makes reuse detection possible.",
+      },
+      {
+        type: "p",
+        text: "If an already-used refresh token is presented again, either the legitimate client or an attacker is replaying it. You cannot tell which, so the safe response is to revoke the whole family and force a fresh login. That turns a silent long-term compromise into a visible, short one.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "public function refresh(string $presented): TokenPair\n{\n    return DB::transaction(function () use ($presented) {\n        $token = RefreshToken::where('token_hash', hash('sha256', $presented))\n            ->lockForUpdate()\n            ->first();\n\n        if (! $token || $token->revoked_at || $token->expires_at->isPast()) {\n            throw new AuthenticationException('Invalid refresh token.');\n        }\n\n        if ($token->used_at !== null) {\n            // Reuse of a rotated token: assume theft, kill the whole family.\n            RefreshToken::where('family_id', $token->family_id)\n                ->whereNull('revoked_at')\n                ->update(['revoked_at' => now()]);\n            event(new RefreshTokenReuseDetected($token->user_id, $token->family_id));\n            throw new AuthenticationException('Session revoked.');\n        }\n\n        $token->update(['used_at' => now()]);\n\n        return $this->tokens->issue($token->user, familyId: $token->family_id);\n    });\n}",
+      },
+      {
+        type: "p",
+        text: "The row lock matters. Without it, two concurrent refreshes from the same legitimate client — two browser tabs waking up at once — can both pass the check, or one can trip reuse detection unnecessarily. Some teams allow a short grace window for the immediately previous token to absorb that race; if you do, keep it to seconds.",
+      },
+      { type: "h2", text: "Revocation and logout that mean something" },
+      {
+        type: "ul",
+        items: [
+          "Logout revokes the refresh token family server-side, then clears client storage. The access token expires on its own within minutes.",
+          "'Log out of all devices' revokes every family for the user. Expose it in account settings and trigger it automatically on password change, MFA reset and account recovery.",
+          "For high-risk actions where minutes are too long — admin deactivation, a confirmed breach — keep a small denylist of revoked session or token identifiers that the API checks, or bump a per-user token version that is embedded in the access token.",
+          "Store refresh tokens in an HttpOnly, Secure, SameSite cookie scoped to the refresh endpoint for browser clients, not in localStorage where any injected script can read them.",
+          "Show users their active sessions with device and last-seen information, and let them end individual ones. It is both a security control and a support tool.",
+        ],
+      },
+      { type: "h2", text: "Do not forget the boring parts" },
+      {
+        type: "p",
+        text: "Store only a hash of each refresh token, the same principle as password storage: a database dump should not contain usable credentials. Give refresh families an absolute lifetime as well as an idle timeout, so a session cannot be extended forever by an automated client. Log issuance, refresh, reuse detection and revocation with user and session identifiers — never the tokens themselves — so an investigation can reconstruct what happened.",
+      },
+      {
+        type: "quote",
+        text: "If logout only happens in the browser, it is not logout. It is forgetting.",
+      },
+      {
+        type: "p",
+        text: "Keep access tokens short and stateless, keep refresh tokens opaque, hashed, rotated and grouped into families, and treat reuse as compromise. Then wire revocation into the events users expect to end their sessions. The result is a system where 'log out' and 'change password' do what users already believe they do.",
+      },
+    ],
+  },
+  {
+    slug: "estimates-customers-can-plan-around",
+    title: "Estimates Customers Can Plan Around",
+    description:
+      "A single date is a promise disguised as an estimate. Ranges, explicit assumptions, early unknown-busting and honest re-forecasting that let customers make real plans around engineering work.",
+    date: "2026-10-05",
+    readingTime: "8 min read",
+    category: "Engineering",
+    tags: ["Estimation", "Planning", "Communication", "Delivery", "Customers"],
+    content: [
+      {
+        type: "p",
+        text: "A customer asks when the integration will be ready. An engineer says 'probably three weeks'. Sales hears 'three weeks', the customer hears 'the 14th', and the customer's own team schedules a training session for the 15th. Five weeks later everyone is frustrated, and nobody lied. The estimate was reasonable; the way it travelled was not.",
+      },
+      {
+        type: "p",
+        text: "Customers do not need perfect estimates. They need estimates they can plan around: ones that state their uncertainty, name the things that could move them, and change early and visibly rather than late and quietly. That is a communication problem as much as an engineering one, and it is one forward-deployed engineers face constantly.",
+      },
+      { type: "h2", text: "Give ranges with a confidence attached" },
+      {
+        type: "p",
+        text: "A single number hides the shape of the risk. 'Three to five weeks, and I'm fairly confident in five' gives the customer something to plan against: they can schedule training after week five and treat anything earlier as a bonus. Ranges feel less impressive in the meeting, but they hold up far better a month later.",
+      },
+      {
+        type: "p",
+        text: "Make the range honest by building it from the work, not from a feeling. Break the job into pieces, mark which pieces you have done before and which are new, and let the unfamiliar pieces widen the range. Work that depends on a third party — API access, a customer's IT team, a security review — gets its own line, because it is usually where the date actually goes.",
+      },
+      { type: "h2", text: "Write the assumptions down" },
+      {
+        type: "ul",
+        items: [
+          "Dependencies on the customer: 'assumes sandbox credentials by Monday and a named contact who can answer data-mapping questions within a day'.",
+          "Scope boundaries: 'covers contacts and companies; custom objects are a separate estimate'.",
+          "Technical unknowns: 'assumes the partner API supports incremental sync; if it does not, add one to two weeks'.",
+          "Capacity: 'assumes one engineer full-time; a production incident elsewhere will push this'.",
+          "Definition of done: 'deployed to production behind a flag and verified with the customer's test account', not 'code written'.",
+        ],
+      },
+      {
+        type: "p",
+        text: "Assumptions turn a missed date from a broken promise into a shared, visible cause. When the sandbox credentials arrive a week late, the conversation is about the assumption that changed, not about whether engineering is reliable.",
+      },
+      { type: "h2", text: "Spend the first days killing unknowns" },
+      {
+        type: "p",
+        text: "The width of a range comes mostly from a few unknowns. Attack those first: make the first authenticated call to the partner API, load a real sample of the customer's data, prototype the riskiest mapping. A couple of days of spike work often collapses a three-to-six-week range into four-to-five, and that narrower range is worth more to the customer than any amount of early feature progress.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "estimate: CRM integration for customer onboarding\nrange: 3-5 weeks (80% confident in <= 5)\nlast_updated: 2026-10-05\nbreakdown:\n  - item: Auth and connection flow\n    range: 2-3 days\n    familiarity: done before\n  - item: Contact and company sync\n    range: 1-2 weeks\n    familiarity: partly new\n  - item: Field mapping UI\n    range: 3-5 days\n    familiarity: done before\n  - item: Partner security review\n    range: 1-2 weeks\n    familiarity: external dependency\nassumptions:\n  - Sandbox credentials available by week 1\n  - Partner API supports incremental sync\n  - Custom objects out of scope\nnext_review: after API spike (end of week 1)",
+      },
+      {
+        type: "quote",
+        text: "An estimate is not a promise about the future. It is a report on what you know today — so report it again when you know more.",
+      },
+      {
+        type: "p",
+        text: "Re-forecast on a schedule, not only when things go wrong: a short weekly note with the current range, what changed and which assumptions still stand. Bad news delivered at week two is a planning input; the same news delivered the day before launch is a trust problem. Customers forgive slips they saw coming. They rarely forgive surprises.",
+      },
+    ],
+  },
+  {
+    slug: "embedding-model-migrations-reindexing-without-downtime",
+    title: "Embedding Model Migrations: Re-indexing Without Downtime",
+    description:
+      "Vectors from two embedding models are not comparable. Dual-writing, shadow indexes, side-by-side retrieval evals and an alias cutover that let you change models without breaking search.",
+    date: "2026-10-06",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["Embeddings", "RAG", "Vector Search", "Migrations", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "Sooner or later a better embedding model appears, or the one you use is deprecated, and someone suggests 'just re-embed everything'. The trap is that vectors from different models live in different spaces. A query embedded with the new model compared against documents embedded with the old one does not return slightly worse results; it returns noise. There is no gradual, row-by-row migration where old and new vectors mix in one index.",
+      },
+      {
+        type: "p",
+        text: "That makes an embedding change closer to a database migration than a config tweak. You need a second index, a way to keep it current while it fills, evidence that it is actually better, and a cutover that can be reversed. Teams that skip those steps usually discover the problem through user complaints about search, after the old vectors are gone.",
+      },
+      { type: "h2", text: "Version everything that produced a vector" },
+      {
+        type: "p",
+        text: "Store, alongside every vector, the model identifier, the dimensions and a version for the chunking and preprocessing pipeline. Changing the chunker invalidates vectors just as surely as changing the model. With that metadata in place, a migration becomes 'build index v2 where embedding_version = 2' rather than an archaeology exercise, and queries can always be routed to an index whose vectors match the query embedder.",
+      },
+      { type: "h2", text: "Build a shadow index and keep it current" },
+      {
+        type: "ul",
+        items: [
+          "Create the new index or table alongside the old one; do not alter the existing column in place. Dimensions often change between models anyway.",
+          "Dual-write from the moment the migration starts: every new or updated document is embedded with both models, so the backfill is chasing a fixed target rather than a moving one.",
+          "Backfill in batches through a queue, ordered by document identifier, with progress checkpoints so a crash resumes rather than restarts. Respect the embedding provider's rate limits and budget the cost up front.",
+          "Handle deletes in both indexes during the overlap. A document removed for legal reasons must not survive in the shadow index and reappear at cutover.",
+          "Track coverage — the share of live documents present in the new index — and do not compare quality until it is effectively complete.",
+        ],
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "def backfill(batch_size: int = 200) -> None:\n    cursor = progress.get('embed_v2_cursor', 0)\n    while True:\n        docs = db.fetch_chunks(after_id=cursor, limit=batch_size, embedding_version_missing=2)\n        if not docs:\n            break\n        vectors = embedder_v2.embed([d.text for d in docs])  # bounded timeout, retries inside\n        with db.transaction():\n            for doc, vec in zip(docs, vectors):\n                # Upsert so a re-run or a concurrent dual-write is harmless.\n                db.upsert_vector(\n                    table='chunk_vectors_v2',\n                    chunk_id=doc.id,\n                    vector=vec,\n                    model='embedder-v2',\n                    pipeline_version=2,\n                )\n            cursor = docs[-1].id\n            progress.set('embed_v2_cursor', cursor)\n\ndef search(query: str, k: int = 10):\n    index = config.active_index()          # 'v1' or 'v2', switched by alias\n    embedder = EMBEDDERS[index]            # query embedder must match the index\n    return vector_store.search(index, embedder.embed([query])[0], k=k)",
+      },
+      { type: "h2", text: "Prove it before you switch" },
+      {
+        type: "p",
+        text: "A newer model is not automatically better for your corpus. Run the same retrieval eval set against both indexes: recall at k on labelled query-document pairs, and if you have it, end-to-end answer quality for the RAG pipeline. Look at the losers as well as the averages — a model that improves general questions but loses exact product codes or internal acronyms may be a net loss for your users. Hybrid search with a keyword component often hides or reveals these differences, so evaluate the system as it actually runs.",
+      },
+      {
+        type: "p",
+        text: "If retrieval improves, check the knock-on effects: similarity thresholds tuned for the old model rarely transfer, because score distributions differ between models. Re-tune any cutoff, reranker threshold or 'no good match' fallback against the new index before cutover.",
+      },
+      {
+        type: "quote",
+        text: "Two embedding models do not disagree about the answer. They disagree about what the question means.",
+      },
+      {
+        type: "p",
+        text: "Cut over with an alias or config switch that changes the query embedder and the target index together, ideally per tenant or for a percentage of traffic first. Keep dual-writing and keep the old index for a defined period so rollback is a config change, not a re-embed. Only when the new index has run cleanly in production should you stop dual-writes and delete the old vectors. It is slower than re-embedding in place, but it is the version of the migration you can undo.",
+      },
+    ],
+  },
+  {
+    slug: "bulk-exports-streaming-millions-of-rows-safely",
+    title: "Bulk Exports: Streaming Millions of Rows Safely",
+    description:
+      "The 'Export to CSV' button that worked for a thousand rows will take down a worker at a million. Streaming, keyset pagination, async jobs and signed downloads for exports that scale.",
+    date: "2026-10-07",
+    readingTime: "8 min read",
+    category: "System Design",
+    tags: ["Exports", "Performance", "Databases", "Queues", "Scalability"],
+    content: [
+      {
+        type: "p",
+        text: "Every B2B product grows an export button. It starts as a controller that loads all the rows, builds a CSV in memory and returns it. That works for months. Then a large customer clicks it on a two-year date range, the request runs until the load balancer kills it, the PHP or Python process hits its memory limit, and a long-running query holds resources on the primary database while it does so.",
+      },
+      {
+        type: "p",
+        text: "Exports are deceptively dangerous because they combine the worst traits of a request — unbounded size, a user waiting — with the worst traits of a batch job: long runtimes and heavy reads. Doing them safely means bounding memory, bounding query cost, moving large ones out of the request cycle, and treating the resulting file as sensitive data.",
+      },
+      { type: "h2", text: "Stream, never accumulate" },
+      {
+        type: "p",
+        text: "Memory use should be constant regardless of row count. Read in chunks, write each row to the output as you go, and never build the whole file in a string or array. Use keyset pagination — WHERE id > last_seen ORDER BY id LIMIT n — rather than OFFSET, which gets slower with every page because the database still walks the skipped rows.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "final class ExportOrders implements ShouldQueue\n{\n    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;\n\n    public int $timeout = 1800;\n\n    public function __construct(public Export $export) {}\n\n    public function handle(): void\n    {\n        $path = \"exports/{$this->export->tenant_id}/{$this->export->uuid}.csv\";\n        $stream = fopen('php://temp', 'w+');\n        fputcsv($stream, ['order_id', 'placed_at', 'customer_email', 'total']);\n\n        Order::query()\n            ->where('tenant_id', $this->export->tenant_id)\n            ->whereBetween('placed_at', [$this->export->from, $this->export->to])\n            ->select(['id', 'placed_at', 'customer_email', 'total'])\n            ->lazyById(2000)\n            ->each(fn (Order $o) => fputcsv($stream, [\n                $o->id, $o->placed_at->toIso8601String(), $o->customer_email, $o->total,\n            ]));\n\n        rewind($stream);\n        Storage::disk('exports')->writeStream($path, $stream);\n        fclose($stream);\n\n        $this->export->markReady($path);\n    }\n}",
+      },
+      {
+        type: "p",
+        text: "lazyById walks the table by primary key in chunks, so memory stays flat and each query is a cheap index range scan. Note that php://temp spills to a temporary file once it exceeds a small in-memory threshold, which keeps memory bounded even for very large exports; for truly huge files, a multipart upload straight to object storage avoids the local disk too.",
+      },
+      { type: "h2", text: "Small exports sync, large exports async" },
+      {
+        type: "ul",
+        items: [
+          "Estimate the row count first. Under a modest threshold, stream the response directly; above it, create an export record, queue a job and tell the user it will be ready shortly.",
+          "Run export queries against a read replica where one exists, with a statement timeout, so a slow export can never block writes on the primary.",
+          "Deduplicate: if the same user requests the same export with the same filters while one is running, return the existing job instead of starting another.",
+          "Cap concurrent exports per tenant so one customer clicking repeatedly cannot occupy every worker.",
+          "Write a consistent snapshot. Iterating by id while rows change means the file reflects no single moment; if that matters, filter on an upper bound captured when the export starts.",
+        ],
+      },
+      { type: "h2", text: "The file is the risk now" },
+      {
+        type: "p",
+        text: "An export is a bulk copy of customer data sitting outside your database's access controls. Scope the query to the requesting tenant and to what the user is allowed to see, store the file in private object storage, deliver it via a short-lived signed URL bound to the export record, and delete it automatically after a few days. Log who requested and downloaded each export. And neutralise spreadsheet formula injection: cells beginning with =, +, - or @ from user-supplied data should be prefixed so Excel treats them as text.",
+      },
+      {
+        type: "quote",
+        text: "An export is a data breach you scheduled on purpose. Treat it with the same care.",
+      },
+      {
+        type: "p",
+        text: "Build exports as a small pipeline rather than an endpoint: estimate, queue, stream with keyset pagination from a replica, write to private storage, notify, expire. It is more moving parts than a controller that returns a CSV, but it is the version that still works when your largest customer asks for everything.",
+      },
+    ],
+  },
+  {
+    slug: "terraform-state-and-drift-across-teams",
+    title: "Terraform State and Drift Across Teams",
+    description:
+      "Shared Terraform state is shared risk. Remote backends with locking, splitting state by blast radius, detecting drift on a schedule and stopping console changes from quietly undoing your code.",
+    date: "2026-10-08",
+    readingTime: "9 min read",
+    category: "Cloud",
+    tags: ["Terraform", "Infrastructure as Code", "DevOps", "AWS", "CI/CD"],
+    content: [
+      {
+        type: "p",
+        text: "Terraform works beautifully for one engineer on one laptop. The trouble starts when three teams share a state file, someone fixes an incident by changing a security group in the console, and the next plan proposes to revert it — or worse, nobody runs a plan for a month and the drift piles up until applying anything feels dangerous.",
+      },
+      {
+        type: "p",
+        text: "State is Terraform's memory of what it manages, and drift is the gap between that memory, your code and the real cloud account. Most painful Terraform incidents come from one of three things: two people writing state at once, a state file so large that every change risks everything, or reality diverging from code without anyone noticing.",
+      },
+      { type: "h2", text: "Remote state with locking, always" },
+      {
+        type: "p",
+        text: "State belongs in a remote backend with locking, versioning and encryption — never in Git and never on a laptop. On AWS that is an S3 bucket with versioning enabled, encryption, blocked public access and a lock mechanism; Terraform Cloud and other managed backends provide the same guarantees. Versioning is your undo button when a bad apply or a manual edit corrupts state. Restrict who can read the bucket: state frequently contains secrets in plain text, such as generated database passwords.",
+      },
+      { type: "h2", text: "Split state by blast radius and ownership" },
+      {
+        type: "ul",
+        items: [
+          "Separate state per environment. A plan for staging should be physically incapable of touching production.",
+          "Separate long-lived foundations — networking, DNS zones, IAM baselines — from frequently changing application stacks. The VPC should not be in the same plan as a Lambda deployment.",
+          "Align state boundaries with team ownership so each team can apply without coordinating a lock with everyone else.",
+          "Share outputs between stacks through explicit interfaces — remote state data sources or parameter stores — rather than copying IDs by hand.",
+          "Keep each state small enough that a plan is quick and readable. A plan nobody can review is a plan nobody actually reviewed.",
+        ],
+      },
+      { type: "h2", text: "Detect drift on a schedule" },
+      {
+        type: "p",
+        text: "Drift is inevitable: incident fixes, auto-scaling side effects, another tool touching tags. The goal is to find it within a day, not a quarter. A scheduled pipeline that runs a refresh-only plan against each stack and alerts on changes turns drift from a surprise into a ticket.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "name: terraform-drift\non:\n  schedule:\n    - cron: '0 6 * * 1-5'\n  workflow_dispatch: {}\njobs:\n  drift:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write   # OIDC to the cloud provider, no static keys\n      contents: read\n    strategy:\n      fail-fast: false\n      matrix:\n        stack: [network, iam, app-prod, app-staging]\n    steps:\n      - uses: actions/checkout@v4\n      - uses: hashicorp/setup-terraform@v3\n      - run: terraform -chdir=stacks/${{ matrix.stack }} init -input=false\n      - name: Plan (refresh only)\n        run: |\n          set +e\n          terraform -chdir=stacks/${{ matrix.stack }} plan -refresh-only -detailed-exitcode -input=false\n          code=$?\n          if [ $code -eq 2 ]; then echo \"Drift detected in ${{ matrix.stack }}\"; exit 1; fi\n          exit $code",
+      },
+      {
+        type: "p",
+        text: "The -detailed-exitcode flag returns 2 when there are changes, which is what lets the pipeline distinguish 'drift' from 'error'. Use a read-only role for this job; detection should never be able to apply.",
+      },
+      { type: "h2", text: "Resolve drift deliberately" },
+      {
+        type: "p",
+        text: "Every drift finding needs a decision: either the code was right and the change should be reverted by applying, or the change was right and the code must be updated to match. The worst outcome is the third option — ignoring it — because the next unrelated apply will silently revert an incident fix. Make console changes in production an exception that requires a follow-up pull request, and narrow console write access so the exception stays rare.",
+      },
+      {
+        type: "quote",
+        text: "Infrastructure as code only works if the code is the only thing changing the infrastructure.",
+      },
+      {
+        type: "p",
+        text: "Lock state remotely, split it by environment and ownership, run plans through CI with reviewed output, and check for drift every working day. None of this is novel, but teams that do all four rarely have the dreaded 'nobody dares to apply' moment — and teams that skip them almost always do.",
+      },
+    ],
+  },
+  {
+    slug: "dead-letter-queues-poison-messages-replays-triage",
+    title: "Dead Letter Queues: Poison Messages, Replays, and Triage",
+    description:
+      "A dead letter queue is only useful if someone looks at it. Separating poison messages from transient failures, capturing enough context to triage, and replaying safely without duplicate side effects.",
+    date: "2026-10-09",
+    readingTime: "8 min read",
+    category: "Distributed Systems",
+    tags: ["Queues", "Messaging", "Reliability", "Idempotency", "Operations"],
+    content: [
+      {
+        type: "p",
+        text: "Most teams configure a dead letter queue on day one and then never look at it again. Months later someone notices it holds forty thousand messages: a few genuinely malformed payloads, thousands of orders that failed during a twenty-minute database outage, and a steady trickle from a bug introduced in a release nobody connected to it. Each of those represents a customer action that silently did not happen.",
+      },
+      {
+        type: "p",
+        text: "A DLQ is not a bin. It is an inbox for work your system could not complete, and it needs the same things any inbox needs: an owner, alerts, enough context to act on each item, and a safe way to send work back once the cause is fixed.",
+      },
+      { type: "h2", text: "Poison versus transient" },
+      {
+        type: "p",
+        text: "A poison message fails every time it is processed: invalid schema, a reference to a record that does not exist, a value the code cannot handle. A transient failure would succeed later: a timeout, a deadlock, a downstream service briefly unavailable. Treating both the same way wastes effort in both directions. Retrying poison messages burns capacity and can block ordered queues; dead-lettering transient failures too early fills the DLQ with work that would have succeeded on its own.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Retry transient errors with exponential backoff and jitter, up to a bounded attempt count or time window, before dead-lettering.",
+          "Dead-letter known permanent errors immediately — validation failures, unknown message versions — rather than retrying them five times.",
+          "Record the failure reason, exception class, attempt count, consumer version and first and last failure timestamps with the message, not only in logs.",
+          "Alert on DLQ depth and on the rate of new arrivals. A sudden spike usually means a deploy or a dependency, not bad data.",
+          "Set a retention period longer than your realistic triage time. Many brokers default to a few days, which is shorter than a long weekend plus a busy Monday.",
+        ],
+      },
+      { type: "h2", text: "Triage by grouping, not by message" },
+      {
+        type: "p",
+        text: "Nobody can investigate forty thousand messages individually. Group them by failure reason and consumer version, and you usually find a handful of causes. Each group gets a decision: fix the code and replay, fix the data and replay, or discard with a recorded reason. Discarding is legitimate — a test message from a deleted tenant does not need rescuing — but it should be an explicit, logged choice.",
+      },
+      { type: "h2", text: "Replay without doing it twice" },
+      {
+        type: "p",
+        text: "Replay is where DLQs cause their own incidents. A message may have partially succeeded before failing — the payment was captured but the confirmation email threw. Replaying it naively captures the payment again. Consumers must be idempotent before replay is safe, which means recording processed message identifiers or using natural idempotency keys on side effects.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "def handle(message: dict) -> None:\n    msg_id = message['id']\n    with db.transaction():\n        # Unique constraint on processed_messages.message_id makes this the gate.\n        inserted = db.execute(\n            'INSERT INTO processed_messages (message_id, processed_at) VALUES (%s, now()) '\n            'ON CONFLICT (message_id) DO NOTHING',\n            [msg_id],\n        ).rowcount\n        if inserted == 0:\n            return  # already processed: replay is a no-op\n        order = create_order(message['payload'])\n    # External call after commit, with its own idempotency key.\n    payments.capture(order.id, amount=order.total, idempotency_key=f'capture:{msg_id}')\n\ndef replay(dlq, queue, reason_filter: str, limit: int = 500) -> int:\n    moved = 0\n    for msg in dlq.receive(max_messages=limit):\n        if msg.attributes.get('failure_reason') != reason_filter:\n            continue\n        queue.send(msg.body, attributes={**msg.attributes, 'replayed': 'true'})\n        dlq.delete(msg)\n        moved += 1\n    return moved",
+      },
+      {
+        type: "p",
+        text: "Replay in bounded batches filtered by failure group, after the fix is deployed, and watch the error rate as you go. Replaying everything at once after an outage can create a second outage: a thundering herd against the dependency that just recovered.",
+      },
+      {
+        type: "quote",
+        text: "An unmonitored dead letter queue is just a slower way of dropping messages.",
+      },
+      {
+        type: "p",
+        text: "Give the DLQ an owner and an alert, store failure context with every message, separate permanent from transient errors, and make consumers idempotent before you build the replay tool. Then the DLQ becomes what it was meant to be: a safety net that catches failures and gives you a clean way to finish the work.",
+      },
+    ],
+  },
+  {
+    slug: "csv-imports-that-dont-corrupt-production",
+    title: "CSV Imports That Don't Corrupt Production",
+    description:
+      "User-supplied spreadsheets are the most hostile input most apps accept. Staging tables, row-level validation, previews, idempotent commits and a way back when an import goes wrong in Laravel.",
+    date: "2026-10-10",
+    readingTime: "9 min read",
+    category: "Laravel",
+    tags: ["Laravel", "Imports", "Validation", "Data Integrity", "Queues"],
+    content: [
+      {
+        type: "p",
+        text: "CSV import is the feature customers ask for in week one and the feature that produces the strangest data in month six. Dates in three formats, an Excel-mangled phone number in scientific notation, a byte-order mark in the first header, a semicolon delimiter from a European locale, and a file that a customer uploaded twice because the progress bar looked stuck. Each of those can silently write wrong data into production.",
+      },
+      {
+        type: "p",
+        text: "The common mistake is treating an import as a loop that validates a row and inserts it. That design fails halfway through, leaving half a file committed, and it gives the user no chance to see what is about to happen. A safer import is a pipeline: upload, parse into staging, validate, preview, commit, and keep enough history to reverse it.",
+      },
+      { type: "h2", text: "Stage first, commit later" },
+      {
+        type: "p",
+        text: "Parse the file into an import_rows staging table linked to an import record, storing the raw values and a row number. Normalise encoding and delimiters during parsing, strip the byte-order mark, and map headers to fields explicitly — never trust column order. Nothing touches real tables at this stage, so a broken file costs nothing but storage.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Validate every staged row with the same rules your forms use, and store per-row errors rather than failing the whole import on the first bad line.",
+          "Match against existing records using a declared key — email, SKU, external ID — and classify each row as create, update, skip or error.",
+          "Show the user a preview: counts per category, the first few errors with row numbers, and a sample of the field-level changes for updates.",
+          "Let the user download the error rows as a CSV, fix them in the spreadsheet they already have, and re-upload just those.",
+          "Bound the work: maximum file size, maximum rows, and a per-tenant limit on concurrent imports.",
+        ],
+      },
+      { type: "h2", text: "Commit in chunks, idempotently" },
+      {
+        type: "p",
+        text: "Only after the user confirms the preview do you write to production tables, in a queued job, in chunks with a transaction per chunk. One giant transaction holds locks for too long on a busy table; one transaction per row is slow and leaves no consistent unit. Make each chunk idempotent so a worker crash and retry does not create duplicates.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "public function handle(): void\n{\n    $import = $this->import;\n\n    $import->rows()\n        ->where('status', 'valid')\n        ->whereNull('committed_at')\n        ->chunkById(500, function ($rows) use ($import) {\n            DB::transaction(function () use ($rows, $import) {\n                foreach ($rows as $row) {\n                    $before = Contact::where('tenant_id', $import->tenant_id)\n                        ->where('email', $row->data['email'])\n                        ->first();\n\n                    $contact = Contact::updateOrCreate(\n                        ['tenant_id' => $import->tenant_id, 'email' => $row->data['email']],\n                        Arr::only($row->data, ['first_name', 'last_name', 'phone', 'company']),\n                    );\n\n                    $row->update([\n                        'committed_at' => now(),\n                        'contact_id' => $contact->id,\n                        'previous_values' => $before?->only(['first_name', 'last_name', 'phone', 'company']),\n                    ]);\n                }\n            });\n        });\n\n    $import->markCompleted();\n}",
+      },
+      {
+        type: "p",
+        text: "Note the explicit field list in Arr::only: an extra column in the file named tenant_id or is_admin must never reach a mass assignment. updateOrCreate needs a unique index on tenant and email to be safe under concurrency, and the whereNull('committed_at') filter means a retried job picks up where it left off rather than reapplying committed rows.",
+      },
+      { type: "h2", text: "Keep a way back" },
+      {
+        type: "p",
+        text: "Storing previous_values per row turns a bad import from a restore-from-backup incident into an action in the admin panel: delete the rows the import created, restore the values it overwrote. Rollback should check whether a record has changed since the import, and skip it with a report rather than clobbering newer edits. Reject duplicate uploads by hashing the file and warning if the same hash was imported recently.",
+      },
+      {
+        type: "quote",
+        text: "Every CSV import is a bulk write by a user who has never seen your schema. Design it like one.",
+      },
+      {
+        type: "p",
+        text: "Staging, validation per row, a preview the user confirms, chunked idempotent commits and a recorded undo add a few tables and a couple of screens. In exchange, imports stop being the feature support dreads, and a bad spreadsheet becomes a correction instead of a data recovery project.",
+      },
+    ],
+  },
+  {
+    slug: "threat-modeling-in-an-afternoon-stride-for-product-teams",
+    title: "Threat Modeling in an Afternoon: STRIDE for Product Teams",
+    description:
+      "Threat modelling does not need a security team or a week of workshops. A lightweight, afternoon-sized STRIDE session that product engineers can run on a new feature and turn into tickets.",
+    date: "2026-10-11",
+    readingTime: "8 min read",
+    category: "Security",
+    tags: ["Threat Modeling", "STRIDE", "AppSec", "Secure Design", "Process"],
+    content: [
+      {
+        type: "p",
+        text: "Most security bugs that reach production were visible on the whiteboard. The webhook endpoint with no signature check, the export that ignored tenant scope, the admin action that trusted a role sent from the browser — none of those needed a penetration test to find. They needed someone to ask 'what could go wrong here?' before the code was written, with the diagram in front of them.",
+      },
+      {
+        type: "p",
+        text: "Threat modelling has a reputation for being heavyweight: long documents, specialist tools, a security architect in the room. For most product features it does not need to be. A focused two-to-three-hour session with the engineers building the feature, using STRIDE as a prompt list, catches the majority of design-level issues and produces a short list of concrete tickets.",
+      },
+      { type: "h2", text: "Draw the feature, not the company" },
+      {
+        type: "p",
+        text: "Scope is what makes it fit in an afternoon. Model one feature or one change: a new integration, a file upload flow, a public API endpoint. Sketch a data-flow diagram with the actors (users, admins, partner systems), the processes (API, worker, third-party service), the data stores, and the arrows between them. Then mark the trust boundaries — anywhere data crosses from something you control to something you do not, or between privilege levels. Threats cluster at those lines.",
+      },
+      { type: "h2", text: "Walk STRIDE across each boundary" },
+      {
+        type: "ul",
+        items: [
+          "Spoofing — can someone pretend to be another user, tenant or service? Unsigned webhooks, guessable tokens and trusting a tenant ID from the request body all live here.",
+          "Tampering — can data be modified in transit or at rest by someone who should not? Client-supplied prices, editable hidden fields, unsigned redirect URLs.",
+          "Repudiation — could someone deny an action and could you prove otherwise? Missing audit logs on permission changes, refunds and data exports.",
+          "Information disclosure — can data leak across tenants, into logs, error messages or URLs? Insecure direct object references are the classic.",
+          "Denial of service and Elevation of privilege — can one caller exhaust shared resources, and can a normal user reach admin-only behaviour through a missing authorisation check?",
+        ],
+      },
+      {
+        type: "p",
+        text: "Do not try to be exhaustive. For each boundary, spend a few minutes per letter asking the question out loud. Write down every plausible threat in one line, without debating fixes yet. The quality of the session depends far more on having the people who know the code in the room than on the precision of the categories.",
+      },
+      { type: "h2", text: "Turn threats into tickets" },
+      {
+        type: "p",
+        text: "In the last hour, rate each threat roughly — likelihood and impact as high, medium or low is enough — and decide: mitigate, accept with a reason, or transfer. Mitigations become tickets with acceptance criteria, ideally including a test. Keep the output short and versioned next to the code so the next change to this feature starts from it.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "feature: Partner webhook ingestion\ndate: 2026-10-11\nparticipants: [backend, frontend, product]\ntrust_boundaries:\n  - Partner -> public webhook endpoint\n  - Webhook worker -> tenant database\nthreats:\n  - id: T1\n    stride: Spoofing\n    threat: Attacker posts forged events to the webhook URL\n    rating: high\n    decision: mitigate\n    action: Verify HMAC signature and timestamp; reject older than 5 minutes\n  - id: T2\n    stride: Elevation of privilege\n    threat: Payload tenant_id used directly to choose tenant\n    rating: high\n    decision: mitigate\n    action: Resolve tenant from the signing secret, ignore payload tenant_id\n  - id: T3\n    stride: Denial of service\n    threat: Partner retry storm floods the queue\n    rating: medium\n    decision: mitigate\n    action: Per-partner rate limit and dedupe on event id\n  - id: T4\n    stride: Repudiation\n    threat: No record of which events changed data\n    rating: low\n    decision: accept\n    reason: Raw events retained 30 days; revisit with audit log work",
+      },
+      {
+        type: "quote",
+        text: "The cheapest security fix is the one you make with a marker pen, before anyone has written the vulnerable code.",
+      },
+      {
+        type: "p",
+        text: "Run a session whenever a feature crosses a new trust boundary: a new external integration, a new upload path, a new role, a new public endpoint. Keep it to an afternoon, keep the output to a page, and make every 'mitigate' a ticket with a test. Done regularly, it builds a team habit of asking the right question early — which is worth more than any single document it produces.",
+      },
+    ],
+  },
+  {
+    slug: "voice-agents-latency-budgets-turn-taking-interruptions",
+    title: "Voice Agents: Latency Budgets, Turn-Taking, and Interruptions",
+    description:
+      "In a voice conversation, a second of silence feels broken. Budgeting latency across speech recognition, the model and synthesis, detecting end of turn, and handling barge-in gracefully.",
+    date: "2026-10-12",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["Voice AI", "LLM", "Latency", "Streaming", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "A chat assistant that takes three seconds to answer is fine. A voice agent that takes three seconds to answer is broken: the caller says 'hello?', the agent starts speaking over them, and both stop. Human conversation runs on tight timing, with gaps between turns that are typically well under a second, and people notice immediately when a system does not keep up.",
+      },
+      {
+        type: "p",
+        text: "Building a voice agent is therefore mostly a latency and timing problem wrapped around an LLM. The model's intelligence matters, but callers judge the system first on whether it responds promptly, knows when they have finished speaking, and stops talking when they interrupt.",
+      },
+      { type: "h2", text: "Write down the latency budget" },
+      {
+        type: "p",
+        text: "In a cascaded pipeline — speech-to-text, language model, text-to-speech — the delay the caller hears is the sum of several stages: detecting that they stopped speaking, finalising the transcript, the model's time to first token, any tool calls, synthesis time to first audio, and network hops in between. Measure each one separately, from the caller's last word to the agent's first audible sound, and set a budget per stage. Without that breakdown, teams optimise the model while the real delay sits in an overly cautious silence timeout.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Stream everything. Partial transcripts feed the model early, the model streams tokens, and synthesis starts on the first sentence rather than waiting for the full reply.",
+          "Choose a smaller, faster model for the conversational turn and push slow reasoning or lookups into tools with a spoken filler — 'let me check that for you' — while they run.",
+          "Co-locate services in one region near the telephony or WebRTC edge; each cross-region hop adds latency the caller hears.",
+          "Keep prompts short and use provider prompt caching for the stable system prompt, since time to first token grows with input length.",
+          "Track latency percentiles, not averages. A p95 of three seconds means one turn in twenty feels broken.",
+        ],
+      },
+      { type: "h2", text: "Turn-taking: knowing when they are done" },
+      {
+        type: "p",
+        text: "Voice activity detection tells you when sound stops; it does not tell you whether the caller has finished. People pause mid-sentence while reading a card number or thinking. A fixed silence threshold forces a bad trade: short and the agent interrupts, long and it feels sluggish. Better systems combine silence duration with signals from the partial transcript — an unfinished phrase like 'my account number is' should extend the wait, a complete question should shorten it.",
+      },
+      { type: "h2", text: "Barge-in: stop talking when interrupted" },
+      {
+        type: "p",
+        text: "When the caller speaks while the agent is talking, the agent should stop within a fraction of a second, discard the unspoken remainder of its reply, and record in the conversation history only what was actually played. Otherwise the model believes it said things the caller never heard. Echo cancellation matters here: without it, the agent's own voice through the caller's speaker can trigger a false interruption.",
+      },
+      {
+        type: "code",
+        lang: "typescript",
+        code: "class TurnManager {\n  private speaking = false;\n  private spokenText = '';\n  private abort?: AbortController;\n\n  async respond(history: Message[], tts: TtsStream, llm: LlmClient) {\n    this.abort = new AbortController();\n    this.speaking = true;\n    this.spokenText = '';\n    for await (const sentence of llm.streamSentences(history, { signal: this.abort.signal })) {\n      const played = await tts.speak(sentence, { signal: this.abort.signal });\n      this.spokenText += played; // only what actually reached the caller\n      if (!this.speaking) break;\n    }\n    this.speaking = false;\n    history.push({ role: 'assistant', content: this.spokenText });\n  }\n\n  onUserSpeechStart(confidence: number) {\n    // Ignore coughs and echo; require real speech before cutting off.\n    if (this.speaking && confidence > 0.6) {\n      this.speaking = false;\n      this.abort?.abort();\n    }\n  }\n}",
+      },
+      {
+        type: "quote",
+        text: "In voice, latency is not a performance metric. It is the user interface.",
+      },
+      {
+        type: "p",
+        text: "Instrument the full path from last word to first sound, budget each stage, and stream at every boundary. Treat end-of-turn detection and barge-in as core features with their own tests, using recorded calls with pauses, interruptions and background noise. A voice agent with an average model and excellent timing will feel better to callers than a brilliant model that keeps talking over them.",
+      },
+    ],
+  },
+  {
+    slug: "read-replicas-replication-lag-reading-your-own-writes",
+    title: "Read Replicas and Replication Lag: Reading Your Own Writes",
+    description:
+      "Read replicas scale reads until a user saves a form and sees the old value. Sticky primary reads, LSN tracking and choosing which queries can tolerate stale data.",
+    date: "2026-10-13",
+    readingTime: "8 min read",
+    category: "Distributed Systems",
+    tags: ["Databases", "Replication", "Consistency", "Scalability", "Laravel"],
+    content: [
+      {
+        type: "p",
+        text: "Adding a read replica is one of the easiest scaling wins available: point read queries at a copy of the database and the primary gets breathing room. Then the bug reports start. A user updates their address, the page reloads, and the old address is still there. They save again. Support cannot reproduce it, because by the time anyone looks, the replica has caught up.",
+      },
+      {
+        type: "p",
+        text: "Asynchronous replicas are always slightly behind the primary — usually milliseconds, sometimes seconds, occasionally much longer during a heavy write burst or a long-running query on the replica. Routing all reads to replicas quietly changes the application's consistency model from 'you see what you wrote' to 'you see what was written a moment ago'. Most code was never designed for that.",
+      },
+      { type: "h2", text: "Decide which reads can be stale" },
+      {
+        type: "ul",
+        items: [
+          "Reads immediately after the same user's write — the redirect after a form save — need read-your-writes consistency.",
+          "Reads that drive further writes — checking a balance, stock level or permission before acting — belong on the primary, ideally inside the same transaction.",
+          "Reports, dashboards, search listings and analytics usually tolerate seconds of lag and are exactly what replicas are for.",
+          "Background jobs dispatched right after a write should read from the primary or be dispatched after commit, or they may not find the row they were created for.",
+          "Authentication and authorisation checks after a permission change should not be served from a lagging replica, or a revoked user keeps access for a while.",
+        ],
+      },
+      { type: "h2", text: "Sticky reads after a write" },
+      {
+        type: "p",
+        text: "The simplest practical technique is stickiness: after a request performs a write, subsequent reads in that request go to the primary. Laravel supports this with the sticky option on a read/write database connection. It solves the in-request case but not the next request — the redirect after a POST is a separate request that may hit a lagging replica. For that, mark the user's session as 'recently wrote' for a short window and route their reads to the primary until it expires.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "// config/database.php (excerpt)\n'mysql' => [\n    'read' => ['host' => [env('DB_READ_HOST')]],\n    'write' => ['host' => [env('DB_WRITE_HOST')]],\n    'sticky' => true, // reads after a write in the same request use the primary\n    // ...\n],\n\n// Middleware: keep a user's reads on the primary briefly after any write.\nfinal class ReadYourWrites\n{\n    public function handle(Request $request, Closure $next): Response\n    {\n        $until = $request->session()->get('primary_reads_until');\n\n        if ($until && now()->timestamp < $until) {\n            DB::connection()->useWriteConnectionWhenReading();\n        }\n\n        $response = $next($request);\n\n        if (DB::connection()->hasModifiedRecords()) {\n            $request->session()->put('primary_reads_until', now()->addSeconds(5)->timestamp);\n        }\n\n        return $response;\n    }\n}",
+      },
+      {
+        type: "p",
+        text: "A fixed window is a heuristic: if lag exceeds it, the bug returns. More precise systems record the primary's replication position after the write — a log sequence number in PostgreSQL or a GTID in MySQL — and only read from a replica that has replayed past it, falling back to the primary otherwise. That is more work, but it turns a guess into a guarantee.",
+      },
+      { type: "h2", text: "Watch the lag itself" },
+      {
+        type: "p",
+        text: "Monitor replication lag per replica and alert well before it reaches your stickiness window. Take lagging replicas out of the read pool automatically; a replica minutes behind is worse than no replica. Long analytical queries on a replica can delay replay or be cancelled, depending on configuration, so isolate heavy reporting on its own replica if you have one.",
+      },
+      {
+        type: "quote",
+        text: "A replica is a copy of the past. Decide, query by query, how far in the past you can afford to live.",
+      },
+      {
+        type: "p",
+        text: "Replicas are worth it, but they are a consistency decision, not just a capacity one. Classify reads by how stale they may be, keep writers on the primary for a short window after they write, route read-before-write logic to the primary, and alert on lag. Then the replica takes load off the primary without making your users doubt their own saves.",
+      },
+    ],
+  },
+  {
+    slug: "runbooks-on-call-engineers-actually-use",
+    title: "Runbooks On-Call Engineers Actually Use",
+    description:
+      "Most runbooks fail at 3am because they were written for reading, not doing. Alert-linked, command-first runbooks with clear decision points, safe actions and an owner who keeps them true.",
+    date: "2026-10-14",
+    readingTime: "8 min read",
+    category: "Developer Productivity",
+    tags: ["On-Call", "Runbooks", "Incident Response", "SRE", "Documentation"],
+    content: [
+      {
+        type: "p",
+        text: "Every team has runbooks. Few have runbooks that get opened during an incident. The typical one is a wiki page written after the last outage: three paragraphs of background, a diagram from two architectures ago, and a command that refers to a server that no longer exists. The engineer paged at 3am skims it, gives up, and starts reading logs from scratch.",
+      },
+      {
+        type: "p",
+        text: "A runbook's reader is tired, stressed and possibly unfamiliar with the system. It has to be found in seconds, understood without context, and followed without guessing. That is a different kind of writing from design documentation, and most runbooks fail because they are written as the latter.",
+      },
+      { type: "h2", text: "Link from the alert, start with the action" },
+      {
+        type: "p",
+        text: "The best place for a runbook link is inside the alert itself. If the page says 'QueueBacklogHigh' and links directly to the runbook for that alert, the search problem disappears. One runbook per alert is a good rule; if an alert has no sensible runbook, ask whether it should page anyone at all.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Open with impact: what users experience when this fires, and how urgent it really is.",
+          "Then the first checks, as copy-pasteable commands or dashboard links, in the order you would actually run them.",
+          "Decision points written as conditions: 'if the backlog is growing and workers are healthy, go to step 4; if workers are crash-looping, go to step 6'.",
+          "Safe mitigations clearly separated from risky ones, with the risky ones marked and an escalation contact named.",
+          "Background and architecture at the bottom, for later — not between the engineer and the fix.",
+        ],
+      },
+      { type: "h2", text: "Make commands safe to paste" },
+      {
+        type: "p",
+        text: "Commands in runbooks are run under pressure, often by someone who did not write them. Prefer read-only diagnostic commands first, make anything destructive require an explicit argument, and avoid instructions that depend on unstated context like 'ssh into the box'. Where a sequence is common, wrap it in a small script checked into the repository so it is tested, reviewed and versioned with the system it manages.",
+      },
+      {
+        type: "code",
+        lang: "bash",
+        code: "#!/usr/bin/env bash\n# runbooks/queue-backlog.sh - diagnose QueueBacklogHigh. Read-only unless --restart is passed.\nset -euo pipefail\n\nNAMESPACE=\"${NAMESPACE:-production}\"\nDEPLOY=\"queue-worker\"\n\necho \"== Worker pods ==\"\nkubectl -n \"$NAMESPACE\" get pods -l app=\"$DEPLOY\" -o wide\n\necho \"== Recent restarts and errors ==\"\nkubectl -n \"$NAMESPACE\" logs -l app=\"$DEPLOY\" --since=15m --tail=50 | grep -iE 'error|exception|killed' || echo 'no errors in last 15m'\n\necho \"== Queue depth by queue ==\"\nkubectl -n \"$NAMESPACE\" exec deploy/app -- php artisan queue:monitor redis:default,redis:emails,redis:integrations\n\nif [[ \"${1:-}\" == \"--restart\" ]]; then\n  read -r -p \"Restart $DEPLOY in $NAMESPACE? Type yes: \" confirm\n  [[ \"$confirm\" == \"yes\" ]] || { echo 'aborted'; exit 1; }\n  kubectl -n \"$NAMESPACE\" rollout restart deploy/\"$DEPLOY\"\n  kubectl -n \"$NAMESPACE\" rollout status deploy/\"$DEPLOY\" --timeout=5m\nfi",
+      },
+      { type: "h2", text: "Keep them true" },
+      {
+        type: "p",
+        text: "A runbook that was correct a year ago is a liability, because it is trusted. Give each runbook an owner and a last-verified date. Update it as part of every incident review: if the responder deviated from the runbook, either the runbook was wrong or the deviation was, and one of them should change. Practise with game days, where someone who did not write the runbook follows it against a staging failure — the gaps show up quickly.",
+      },
+      {
+        type: "quote",
+        text: "Write the runbook for the engineer you will be at 3am: competent, exhausted, and in no mood to read prose.",
+      },
+      {
+        type: "p",
+        text: "Link every paging alert to one runbook, lead with impact and the first commands, write decisions as conditions, separate safe actions from risky ones, and review the runbook after every incident. Runbooks built that way shorten incidents, spread on-call knowledge beyond the people who built the system, and make being paged a little less lonely.",
+      },
+    ],
+  },
+  {
+    slug: "sso-for-b2b-saas-saml-oidc-scim-provisioning",
+    title: "SSO for B2B SaaS: SAML, OIDC, and SCIM Provisioning",
+    description:
+      "Enterprise customers will ask for SSO, then for SCIM. What SAML and OIDC actually do, the security checks that matter, tenant-aware login routing, and keeping user lifecycle in sync.",
+    date: "2026-10-15",
+    readingTime: "9 min read",
+    category: "Security",
+    tags: ["SSO", "SAML", "OIDC", "SCIM", "Authentication"],
+    content: [
+      {
+        type: "p",
+        text: "The first enterprise deal usually arrives with a security questionnaire, and somewhere on it is 'Do you support SSO via our identity provider?'. The second one asks about SCIM. For a B2B product these stop being nice-to-haves quickly: large customers want staff to sign in with their corporate identity, and they want access removed the moment someone leaves.",
+      },
+      {
+        type: "p",
+        text: "SSO is easy to get working and surprisingly easy to get subtly wrong. A login that works with one identity provider can still accept assertions meant for another tenant, link accounts by an unverified email, or leave a departed employee with an active session for weeks. The protocol is only part of the job; tenancy and lifecycle are the rest.",
+      },
+      { type: "h2", text: "SAML and OIDC in one paragraph each" },
+      {
+        type: "p",
+        text: "SAML 2.0 is the older, XML-based standard still common in enterprise identity providers. The provider sends a signed XML assertion through the browser to your assertion consumer service URL, and you validate the signature against the certificate the customer configured. OIDC is an identity layer on OAuth 2.0: your app redirects the user to the provider, receives an authorisation code, exchanges it server-side for tokens, and validates a signed ID token. Most B2B products end up supporting both, because customers choose their provider, not you.",
+      },
+      { type: "h2", text: "The checks that matter" },
+      {
+        type: "ul",
+        items: [
+          "Use a well-maintained library for SAML signature validation. XML signature wrapping attacks are real, and hand-rolled parsing is how they succeed.",
+          "Validate audience, issuer, destination, expiry and not-before on every assertion or ID token, and reject replayed assertion IDs. For OIDC, validate state and nonce and use PKCE.",
+          "Bind each SSO connection to exactly one tenant. An assertion from tenant A's identity provider must never be able to log a user into tenant B, regardless of the email inside it.",
+          "Link to existing accounts by provider subject identifier, not by email alone, and only allow email-based linking for domains the tenant has verified.",
+          "Once a tenant enforces SSO, block password login and password reset for its users, or the old path remains a bypass.",
+        ],
+      },
+      {
+        type: "code",
+        lang: "typescript",
+        code: "async function handleOidcCallback(req: Request): Promise<Session> {\n  const pending = await loginStates.consume(req.query.state); // single use, short TTL\n  if (!pending) throw new AuthError('invalid or expired state');\n\n  const connection = await ssoConnections.findById(pending.connectionId);\n  const tokens = await oidc.exchangeCode(connection, req.query.code, pending.codeVerifier);\n  const claims = await oidc.verifyIdToken(tokens.idToken, {\n    issuer: connection.issuer,\n    audience: connection.clientId,\n    nonce: pending.nonce,\n  });\n\n  // Identity is (connection, subject), never email alone.\n  let user = await users.findBySsoSubject(connection.id, claims.sub);\n  if (!user) {\n    const domain = claims.email.split('@')[1];\n    if (!(await connection.tenant.hasVerifiedDomain(domain))) {\n      throw new AuthError('email domain not verified for this tenant');\n    }\n    user = await users.provisionJustInTime(connection.tenant, claims);\n  }\n  if (user.tenantId !== connection.tenantId || user.deactivatedAt) {\n    throw new AuthError('user not permitted for this connection');\n  }\n  return sessions.create(user, { authMethod: 'sso', connectionId: connection.id });\n}",
+      },
+      {
+        type: "p",
+        text: "Login routing is the other practical problem. With many tenants, the login page needs to know which connection to use. Common approaches are a tenant-specific subdomain or an email-first screen that looks up the verified domain and redirects to the right provider. Avoid revealing whether an arbitrary email has an account while doing it.",
+      },
+      { type: "h2", text: "SCIM closes the lifecycle loop" },
+      {
+        type: "p",
+        text: "SSO controls how people sign in; it does nothing when they leave. Just-in-time provisioning creates users on first login, but a deactivated employee simply stops logging in — their account and any API tokens stay active. SCIM 2.0 lets the customer's identity provider create, update and deactivate users and groups in your product through a standard REST API. Deactivation should revoke sessions and tokens immediately, and SCIM endpoints need their own per-tenant bearer tokens, tenant scoping on every operation and idempotent handling, because providers retry and resend.",
+      },
+      {
+        type: "quote",
+        text: "SSO decides who gets in. SCIM decides who stays in. Enterprise customers need both.",
+      },
+      {
+        type: "p",
+        text: "Use proven libraries for the protocols, bind every connection to a single tenant, identify users by provider subject rather than email, enforce SSO by closing the password path, and add SCIM so deprovisioning is immediate. Whether you build it or use a managed identity service, test the failure cases — wrong tenant, expired assertion, deactivated user — as carefully as the happy path.",
+      },
+    ],
+  },
+  {
+    slug: "requirements-discovery-it-should-just-work",
+    title: "Requirements Discovery: Turning 'It Should Just Work' into a Spec",
+    description:
+      "'It should just work' is a requirement with every hard decision left out. A practical method for turning vague customer asks into a spec with examples, edge cases and acceptance criteria that engineering can build and the customer can sign off.",
+    date: "2026-10-16",
+    readingTime: "9 min read",
+    category: "Engineering",
+    tags: ["Requirements", "Forward Deployed Engineering", "Specs", "Acceptance Criteria", "Stakeholders"],
+    content: [
+      {
+        type: "p",
+        text: "Every engineer has been handed a requirement that reads, in full, 'the import should just work'. It sounds like a modest request. In practice it is a sentence that has quietly deferred every difficult decision: what happens to duplicate rows, which file formats count, whether a half-failed import is rolled back or kept, who gets told, and what 'work' means when the source system sends malformed dates. Those decisions do not disappear because nobody wrote them down. They get made anyway, by whoever writes the code, usually at the worst possible moment.",
+      },
+      {
+        type: "p",
+        text: "Requirements discovery is the work of surfacing those decisions while they are still cheap. It is not a document template and it is not a meeting. It is a habit of asking for concrete examples until the ambiguity runs out, and then writing down what was agreed in a form that both the customer and the test suite can check.",
+      },
+      { type: "h2", text: "Ask for examples, not descriptions" },
+      {
+        type: "p",
+        text: "Stakeholders describe the happy path in the abstract and the edge cases not at all. The fastest way past that is to stop asking 'what should it do?' and start asking 'show me one'. Ask for a real file they import today, a real customer record that caused trouble last quarter, the spreadsheet someone keeps on the side because the system gets it wrong. Concrete artefacts expose the rules people follow without noticing: the column that is sometimes blank, the account code that means something different for one region, the manual step that happens after the 'automatic' one.",
+      },
+      {
+        type: "p",
+        text: "Once you have a real example, walk it through the proposed behaviour out loud and keep asking 'and then what?'. The gaps appear quickly. The import succeeds, and then what — does anyone get an email? A row fails validation, and then what — does the whole file stop, or does it continue and report? The person who owns the process usually knows the answer immediately; they just never had a reason to say it.",
+      },
+      { type: "h2", text: "The questions that uncover hidden requirements" },
+      {
+        type: "ul",
+        items: [
+          "Failure behaviour: when part of the operation fails, is the result all-or-nothing, best-effort with a report, or retried later? This single answer changes the data model, the transaction boundaries and the UI.",
+          "Volume and timing: how many records, how often, and how quickly does the result need to be visible? 'Instant' for 50 rows and 'by tomorrow morning' for 2 million rows are different systems.",
+          "Ownership and permissions: who is allowed to trigger it, who can see the results, and does anything cross a tenant, region or department boundary?",
+          "Corrections and reversals: when someone discovers a mistake next week, how do they undo it? If the answer is 'call support', that is a requirement for an admin tool, not an absence of one.",
+          "What happens today: the current manual process is the most honest specification you will get. Every workaround in it is a requirement the new system must either honour or explicitly retire.",
+        ],
+      },
+      { type: "h2", text: "Write the spec as examples with outcomes" },
+      {
+        type: "p",
+        text: "The output of discovery should be short and checkable. Prose paragraphs invite interpretation; a table of given-when-then examples does not. Each agreed rule becomes a scenario with a concrete input and a concrete expected outcome, and each open question is written down as an open question with an owner rather than silently resolved by the engineer. That artefact then does three jobs: the customer signs it off, engineering builds against it, and the scenarios become acceptance tests almost verbatim.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "feature: Supplier price list import\nowner: procurement-ops\nscenarios:\n  - name: valid file replaces current prices\n    given: active price list with 1,200 lines for supplier ACME\n    when: user uploads a CSV with 1,250 valid lines\n    then:\n      - new price list becomes active at 00:00 next business day\n      - previous list is archived, not deleted\n      - uploader receives a summary email\n  - name: invalid rows do not block the file\n    given: CSV with 3 rows missing a unit price\n    when: user uploads the file\n    then:\n      - valid rows are staged\n      - invalid rows are listed with line number and reason\n      - nothing activates until the user confirms\n  - name: duplicate SKU in the same file\n    then: import is rejected with both line numbers shown\nopen_questions:\n  - question: Should price decreases over 20% need approval?\n    owner: head of procurement\n    due: before build starts",
+      },
+      {
+        type: "p",
+        text: "Notice what the format forces. The vague word 'replaces' became a precise activation time. 'Handles errors' became a decision about staging versus blocking. The duplicate rule is explicit, and the approval question is visible rather than guessed. A reviewer from the customer side can read this in five minutes and say 'no, that is wrong' about a specific line, which is exactly what you want to happen before code exists.",
+      },
+      { type: "h2", text: "Resolve contradictions before they reach the code" },
+      {
+        type: "p",
+        text: "Discovery with more than one stakeholder will turn up rules that conflict: finance wants every change approved, operations wants imports to go live without waiting. Do not pick a winner in the code and hope nobody notices. Put both positions side by side with a concrete example of the consequence, and ask the person who owns the outcome to decide. Engineers are often tempted to make the system configurable so everyone gets their way. Sometimes that is right; more often it doubles the test matrix to avoid a five-minute conversation.",
+      },
+      {
+        type: "p",
+        text: "Equally, be explicit about what is out of scope. A line saying 'multi-currency price lists are not supported in this release' prevents a month of quiet assumption on both sides. Scope boundaries are requirements too, and they are the ones most often discovered only at user acceptance testing.",
+      },
+      {
+        type: "quote",
+        text: "'It should just work' is not a requirement. It is a list of decisions nobody has made yet, and the code will make them for you if you let it.",
+      },
+      {
+        type: "p",
+        text: "The practical habit is simple: before building anything non-trivial, get one real example, walk it through end to end, write the agreed behaviour as scenarios with outcomes, and list the open questions with owners. It costs an hour or two. It routinely saves the rework that happens when a customer sees the finished feature and says, reasonably, 'that is not what I meant' — because nobody ever asked them what they meant.",
+      },
+    ],
+  },
+  {
+    slug: "llm-output-guardrails-validation-moderation-safe-failure",
+    title: "LLM Output Guardrails: Validation, Moderation, and Safe Failure",
+    description:
+      "Model output is untrusted input that happens to come from your own system. How to layer structural validation, business-rule checks and moderation so that a bad generation fails safely instead of reaching a customer or a database.",
+    date: "2026-10-17",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["LLM", "Guardrails", "Validation", "Production AI", "Safety"],
+    content: [
+      {
+        type: "p",
+        text: "Teams spend a great deal of effort on what goes into a model — prompts, retrieval, context — and remarkably little on what comes out. The output is treated as an answer, when it should be treated as untrusted input that happens to originate inside your own system. It can be malformed, confidently wrong, off-policy, or shaped by a prompt injection buried in a retrieved document. If it flows straight into a customer email, a database write or a tool call, every one of those failure modes becomes a production incident.",
+      },
+      {
+        type: "p",
+        text: "Output guardrails are the checks between generation and effect. They are not one filter; they are layers, each catching a different class of problem, with a defined behaviour for what happens when a check fails. The last part matters most. A guardrail that detects a problem and then has nowhere sensible to go simply turns a bad answer into an error page.",
+      },
+      { type: "h2", text: "Layer one: structure" },
+      {
+        type: "p",
+        text: "If downstream code consumes the output, the output needs a schema. Use the provider's structured output or tool-calling features where available, and validate the result anyway with a strict model on your side — required fields, enumerations, lengths, formats. Structured output modes make malformed JSON rare; they do not make semantically invalid values impossible. A field typed as a string will happily contain a hallucinated order number.",
+      },
+      { type: "h2", text: "Layer two: business rules and grounding" },
+      {
+        type: "p",
+        text: "Structure tells you the output is well-formed. Business rules tell you it is allowed. These checks are deterministic code, not another model call: does the referenced customer ID belong to the current tenant, is the proposed refund under the policy limit, does every cited document ID appear in the retrieved set, is the date in the future when it must be. Grounding checks are the most valuable of these for retrieval systems — if the model cites a source that was never in its context, the answer should not ship regardless of how fluent it reads.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "from pydantic import BaseModel, Field, ValidationError\n\nclass RefundDecision(BaseModel):\n    order_id: str\n    action: str = Field(pattern='^(approve|deny|escalate)$')\n    amount: float = Field(ge=0)\n    reason: str = Field(max_length=500)\n    cited_policy_ids: list[str]\n\ndef guard(raw: str, ctx) -> RefundDecision:\n    try:\n        d = RefundDecision.model_validate_json(raw)\n    except ValidationError:\n        return escalate(ctx, 'schema_invalid')\n    if d.order_id not in ctx.tenant_order_ids:\n        return escalate(ctx, 'order_not_in_tenant')\n    if d.action == 'approve' and d.amount > ctx.policy.auto_refund_limit:\n        return escalate(ctx, 'over_auto_limit')\n    if not set(d.cited_policy_ids) <= ctx.retrieved_policy_ids:\n        return escalate(ctx, 'ungrounded_citation')\n    if ctx.moderation.flags(d.reason):\n        return escalate(ctx, 'moderation')\n    return d\n\ndef escalate(ctx, reason: str) -> RefundDecision:\n    ctx.metrics.increment('guardrail.fail', tags={'reason': reason})\n    return RefundDecision(order_id=ctx.order_id, action='escalate',\n                          amount=0, reason='Needs human review', cited_policy_ids=[])",
+      },
+      { type: "h2", text: "Layer three: moderation and policy" },
+      {
+        type: "p",
+        text: "Anything a customer will read should pass a content check appropriate to the context: toxicity, personal data that should not be echoed back, statements the business is not allowed to make such as legal or medical advice, and competitor or pricing claims that need approval. Moderation can be a hosted classifier, a small model, or pattern rules for the narrow cases. Keep it proportionate — an internal summarisation tool does not need the same filters as a public chatbot — and log what it flags so you can tell whether it is catching real problems or just adding latency.",
+      },
+      { type: "h2", text: "Designing the failure path" },
+      {
+        type: "ul",
+        items: [
+          "Retry with feedback, once: for structural failures, a single repair attempt that includes the validation error usually succeeds. More than one retry mostly burns tokens and latency.",
+          "Fall back to a safe default: an escalation to a human, a templated response, or 'I could not answer that reliably' is far better than a plausible wrong answer.",
+          "Never fail open on side effects: if a guardrail check errors or times out, the write, email or tool call does not happen. Read-only display can be more lenient; actions cannot.",
+          "Record every failure with its reason: guardrail failure rates by reason are one of the best early signals of a prompt regression, a model change, or an injection attempt.",
+          "Keep the user informed honestly: a short, accurate message that a request has been passed to a person builds more trust than a generated answer that later turns out to be wrong.",
+        ],
+      },
+      {
+        type: "quote",
+        text: "Treat model output the way you treat a form submission from the internet: parse it, check it, and assume someone, somewhere, is trying to make it lie.",
+      },
+      {
+        type: "p",
+        text: "Start with the cheapest layers. A strict schema and a handful of deterministic business-rule checks will catch most of the failures that actually hurt, at almost no cost. Add moderation where users read the output, make every failure path explicit and safe, and put the failure reasons on a dashboard. The goal is not a model that never produces a bad answer — that model does not exist — but a system in which a bad answer has nowhere to go.",
+      },
+    ],
+  },
+  {
+    slug: "serverless-lambda-for-glue-not-everything",
+    title: "Serverless Where It Fits: Lambda for Glue, Not for Everything",
+    description:
+      "Lambda is excellent at small, event-driven glue between managed services and awkward as the backbone of a whole application. Where functions earn their place, where they fight you, and how to keep them boring in production.",
+    date: "2026-10-18",
+    readingTime: "8 min read",
+    category: "Cloud",
+    tags: ["AWS", "Lambda", "Serverless", "Event-Driven", "Architecture"],
+    content: [
+      {
+        type: "p",
+        text: "Serverless functions tend to arrive in an organisation in one of two ways. Either someone uses one to resize an uploaded image and it quietly works for years, or someone decides the next product will be 'fully serverless' and, eighteen months later, the team is debugging a distributed system made of two hundred functions, each with its own deployment, permissions and cold-start behaviour. Both are Lambda. Only one of them is a good use of it.",
+      },
+      {
+        type: "p",
+        text: "The useful question is not whether serverless is good, but which work has the shape functions are good at. That shape is narrow and very common: short, stateless reactions to events that already exist in a managed service.",
+      },
+      { type: "h2", text: "Where functions shine" },
+      {
+        type: "ul",
+        items: [
+          "Event glue between managed services: an object lands in S3, a message arrives on SQS, a row changes in DynamoDB, and a small piece of code transforms it and passes it on. No server sits idle waiting for this to happen.",
+          "Spiky or rare workloads: a nightly export, a webhook receiver that sees bursts after a partner's batch run, an admin task that runs a few times a week. Paying per invocation beats paying for a container that is idle most of the day.",
+          "Isolation of risky or awkward dependencies: a PDF renderer or a document converter with a heavy runtime can live in its own function, with its own memory limit, rather than inside your main application image.",
+          "Scheduled housekeeping: expiring records, rotating reports, pinging health endpoints. EventBridge schedules plus a function are simpler than a cron container you have to keep alive.",
+        ],
+      },
+      { type: "h2", text: "Where they fight you" },
+      {
+        type: "p",
+        text: "Functions become painful when you ask them to be an application. A request path that fans out through several functions accumulates cold starts and network hops. Long-running work runs into the execution time limit and has to be split into step machines that would have been a simple loop in a worker. Connection-heavy workloads against relational databases need a proxy layer because every concurrent invocation wants its own connection. Local development and debugging become an exercise in emulators. And the domain logic, split across dozens of handlers, loses the cohesion that made it understandable.",
+      },
+      {
+        type: "p",
+        text: "A reasonable default for most product teams is a conventional application — a Laravel or Python service on containers — for the core domain and the synchronous API, with functions at the edges where events cross between managed services. The core stays easy to reason about and test; the glue stays cheap and decoupled.",
+      },
+      { type: "h2", text: "Make the glue boring" },
+      {
+        type: "p",
+        text: "Event sources deliver at least once, so every handler must be idempotent. Batches can partially fail, so report individual failures rather than throwing away the whole batch. Timeouts should be set well below the source's visibility timeout, and anything that repeatedly fails should land in a dead-letter queue that someone actually watches. These are the same rules as any queue consumer; Lambda just makes it easier to forget them because the infrastructure feels invisible.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "import json\nimport boto3\nfrom botocore.exceptions import ClientError\n\ndynamodb = boto3.client('dynamodb')\nTABLE = 'processed_events'\n\ndef handler(event, context):\n    failures = []\n    for record in event['Records']:\n        try:\n            body = json.loads(record['body'])\n            # Idempotency: claim the event ID once; duplicates are skipped.\n            dynamodb.put_item(\n                TableName=TABLE,\n                Item={'event_id': {'S': body['event_id']}},\n                ConditionExpression='attribute_not_exists(event_id)',\n            )\n            forward_to_billing(body)\n        except ClientError as e:\n            if e.response['Error']['Code'] == 'ConditionalCheckFailedException':\n                continue  # already processed\n            failures.append({'itemIdentifier': record['messageId']})\n        except Exception:\n            failures.append({'itemIdentifier': record['messageId']})\n    # Requires ReportBatchItemFailures on the event source mapping.\n    return {'batchItemFailures': failures}",
+      },
+      {
+        type: "p",
+        text: "One subtlety in that example: the idempotency record is written before the downstream call, so a crash between the two would skip the event on retry. Where that matters, write the claim with a 'pending' status and mark it complete afterwards, or make the downstream call itself idempotent with the same event ID. Choosing which is a business decision about whether a duplicate or a gap is worse.",
+      },
+      {
+        type: "quote",
+        text: "A function is a great place to put twenty lines of glue. It is a terrible place to put the part of your business you need to understand.",
+      },
+      {
+        type: "p",
+        text: "Use functions where an event already exists in a managed service and the reaction is short, stateless and idempotent. Keep the core domain in a deployable you can run locally and test as a whole. Count your functions occasionally; when the number keeps rising and the handlers start calling each other, that is the signal that glue has turned into an application and deserves to be built like one.",
+      },
+    ],
+  },
+  {
+    slug: "upgrading-laravel-major-versions-large-codebase",
+    title: "Upgrading Laravel Major Versions on a Large Codebase",
+    description:
+      "Major framework upgrades stall when they are treated as one heroic branch. A repeatable approach for large Laravel applications: inventory dependencies, upgrade in small mergeable steps, lean on automated refactoring, and let the test suite decide when you are done.",
+    date: "2026-10-19",
+    readingTime: "9 min read",
+    category: "Laravel",
+    tags: ["Laravel", "PHP", "Upgrades", "Technical Debt", "Testing"],
+    content: [
+      {
+        type: "p",
+        text: "On a small Laravel application, a major version upgrade is an afternoon: read the upgrade guide, bump the constraint, fix what breaks. On a large codebase with years of history, dozens of packages and a test suite of uneven quality, the same upgrade becomes a long-lived branch that drifts further from main every week until someone abandons it. Then the application sits two or three versions behind, accumulating security exposure and blocking every package update that needs a newer framework.",
+      },
+      {
+        type: "p",
+        text: "The difference is not the framework. Laravel's upgrade guides are good and most major releases change relatively little in user-facing APIs. The difference is approach: large upgrades succeed when they are broken into small, mergeable steps that each leave main deployable, and fail when they are attempted as one big switch.",
+      },
+      { type: "h2", text: "Inventory before you touch anything" },
+      {
+        type: "p",
+        text: "The framework is rarely the blocker; third-party packages are. Before changing a constraint, find out which of your direct dependencies already support the target version, which have a newer major that does, and which are abandoned. Composer can tell you most of this. The abandoned packages are the real work, and finding them first lets you plan replacements as separate pieces of work rather than discovering them halfway through.",
+      },
+      {
+        type: "code",
+        lang: "bash",
+        code: "# What prevents installing the next major right now?\ncomposer why-not laravel/framework ^12.0\n\n# Direct dependencies with newer releases available\ncomposer outdated --direct\n\n# Check PHP version requirements across the lock file\ncomposer check-platform-reqs\n\n# Preview automated refactors without writing changes\nvendor/bin/rector process --dry-run\n\n# Upgrade on a branch, then let the suite decide\ncomposer require laravel/framework:^12.0 --update-with-all-dependencies\nphp artisan test --parallel\nvendor/bin/phpstan analyse --memory-limit=1G",
+      },
+      { type: "h2", text: "Do the preparatory work on main" },
+      {
+        type: "p",
+        text: "Most of an upgrade can land before the version bump. Replace deprecated calls, upgrade packages to versions that support both the current and target framework, raise the PHP version if the new release requires it, and fix static analysis warnings in the areas the upgrade guide calls out. Each of these is a small pull request that ships normally. By the time you change the framework constraint, the remaining diff should be small enough to review in one sitting.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Upgrade PHP first and separately: a new PHP minor version surfaces its own deprecations, and mixing those with framework changes makes failures harder to attribute.",
+          "Swap abandoned packages one at a time, each behind its own pull request and with tests around the behaviour it provided.",
+          "Use automated refactoring tools such as Rector with community Laravel rule sets for mechanical changes, and review the diff like any other change — automated does not mean correct.",
+          "Turn deprecation notices into failures in the test environment, so new code stops adding to the pile while you are clearing it.",
+          "Keep the application skeleton changes in mind: newer releases sometimes restructure configuration and bootstrapping files, and you can usually choose to adopt those gradually rather than all at once.",
+        ],
+      },
+      { type: "h2", text: "Let tests and types decide when you are done" },
+      {
+        type: "p",
+        text: "On a large codebase you cannot read every file, so you need a mechanical signal. The test suite is the primary one, which is why a weak suite should be strengthened in the areas the upgrade touches before you start — authentication, queues, mail, validation, anything that relies on framework internals. Static analysis is the second signal: at a reasonable level it catches removed methods, changed signatures and wrong return types across code paths the tests never exercise.",
+      },
+      {
+        type: "p",
+        text: "Then deploy the upgrade like any risky change. Ship it to a staging environment with production-like data, watch the error tracker and queue failure rates, and roll out behind your normal progressive deployment process. Keep the previous release ready to redeploy. Framework upgrades rarely change the database schema, which makes rollback straightforward, but check for package migrations that do.",
+      },
+      {
+        type: "quote",
+        text: "An upgrade branch that lives for a month is not an upgrade. It is a fork you will eventually throw away.",
+      },
+      {
+        type: "p",
+        text: "The sustainable answer is to stop treating major upgrades as projects. Keep dependencies current every month, clear deprecations as they appear, and upgrade the framework within a few months of each release while the gap is small. Teams that do this find each upgrade is a day or two of work. Teams that skip versions pay for all of them at once, with interest.",
+      },
+    ],
+  },
+  {
+    slug: "hot-keys-and-hot-partitions",
+    title: "Hot Keys and Hot Partitions: Finding and Spreading Load",
+    description:
+      "Partitioned systems scale until one key gets popular. How to detect hot keys and hot partitions in caches, queues and databases, and the techniques — salting, local caching, request coalescing, splitting — that spread the load without breaking correctness.",
+    date: "2026-10-20",
+    readingTime: "9 min read",
+    category: "Distributed Systems",
+    tags: ["Partitioning", "Redis", "Scalability", "Kafka", "Performance"],
+    content: [
+      {
+        type: "p",
+        text: "Partitioning is how distributed systems scale: spread keys across shards, nodes or partitions and each one handles a fraction of the load. The arithmetic assumes keys are roughly equally popular. Real traffic is not. One tenant is ten times bigger than the rest, one product goes viral, one configuration key is read on every request, one Kafka partition receives every event for a busy account. Aggregate capacity looks fine on the dashboard while a single node sits at full CPU and every request that touches it slows down.",
+      },
+      {
+        type: "p",
+        text: "Hot keys are not a failure of the partitioning scheme so much as a property of the workload. The engineering task is to find them before customers do and to choose a technique that spreads the load without quietly changing the semantics of the data.",
+      },
+      { type: "h2", text: "Finding the hot spot" },
+      {
+        type: "p",
+        text: "Averages hide hot spots by design, so look at per-partition metrics: CPU, operations per second, and latency for each node, shard or partition, not for the cluster. A large gap between the busiest and the median partition is the symptom. From there, find the key. Most stores have a way to sample key access — Redis can report hot keys when an LFU eviction policy is configured, managed databases expose per-partition throughput, and Kafka consumer lag broken down by partition points directly at the skewed one. When the store cannot help, sample keys in your own client wrapper and count them; a short window of top-N counts usually makes the culprit obvious.",
+      },
+      { type: "h2", text: "Techniques for spreading load" },
+      {
+        type: "ul",
+        items: [
+          "Local caching for hot reads: if one key is read on every request and changes rarely, cache it in process memory for a few seconds. Every application instance absorbs its own reads and the shared cache sees a trickle.",
+          "Request coalescing: when many concurrent requests miss on the same key, let one fetch it and the rest wait for that result. This turns a stampede into a single load.",
+          "Key salting for hot writes: split one logical key into N physical keys by appending a suffix, write to a random or hashed suffix, and aggregate on read. Counters and append-only data suit this well.",
+          "Read replicas for hot read partitions: replicate the hot shard and route reads across copies, accepting the replication lag that comes with it.",
+          "Split the tenant or entity: when one customer is simply bigger than a partition, give them dedicated capacity or a finer-grained partition key, rather than making everyone else share their hot spot.",
+        ],
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "import random\nimport redis\n\nr = redis.Redis()\nSHARDS = 16  # tune to the write rate of the hottest key\n\ndef incr_views(product_id: str, amount: int = 1) -> None:\n    # Writes spread across 16 keys, which hash to different cluster slots.\n    shard = random.randrange(SHARDS)\n    r.incrby(f'views:{product_id}:{shard}', amount)\n\ndef get_views(product_id: str) -> int:\n    keys = [f'views:{product_id}:{i}' for i in range(SHARDS)]\n    total = 0\n    # Keys live on different nodes, so read them individually\n    # (or group by slot) rather than with a single MGET.\n    pipe = r.pipeline(transaction=False)\n    for k in keys:\n        pipe.get(k)\n    for v in pipe.execute():\n        total += int(v or 0)\n    return total",
+      },
+      {
+        type: "p",
+        text: "The salted counter is a good illustration of the trade-off. Writes now spread across the cluster, but reads cost N lookups and the total is only as consistent as the slowest of them. For a view counter that is fine. For an account balance it would not be, because there is no longer a single place where an atomic check-and-update can happen. Salting works for commutative operations — counts, sums, appends — and is the wrong tool where invariants have to hold across the whole key.",
+      },
+      { type: "h2", text: "Hot partitions in queues and logs" },
+      {
+        type: "p",
+        text: "Message systems that partition by key for ordering have the same problem in a different form. Keying every event by tenant ID guarantees per-tenant order and also guarantees that your biggest tenant saturates one partition and one consumer. Ask what ordering you actually need. Often it is per entity — per order, per document — not per tenant, and keying on the finer identifier spreads the load while keeping the ordering that matters. When a tenant genuinely needs ordered processing at high volume, that is a capacity planning conversation, not something a partition key can fix.",
+      },
+      {
+        type: "quote",
+        text: "Your cluster has the capacity of all its nodes until one key gets popular. Then it has the capacity of one.",
+      },
+      {
+        type: "p",
+        text: "Monitor per-partition, not just in aggregate, and keep a way to sample which keys are busiest. When a hot spot appears, start with the cheapest fix that preserves correctness: a short local cache or request coalescing for reads, a finer partition key for ordered streams, salting only for data that can be summed back together. And when one tenant is the hot spot, treat it as the product signal it is — they are your biggest customer, and they probably deserve capacity of their own.",
+      },
+    ],
+  },
+  {
+    slug: "event-schema-evolution-without-breaking-consumers",
+    title: "Event Schema Evolution Without Breaking Consumers",
+    description:
+      "Events outlive the code that produced them and are read by teams you have never met. The compatibility rules, versioning strategies and consumer habits that let event schemas change safely in a running system.",
+    date: "2026-10-21",
+    readingTime: "9 min read",
+    category: "Architecture",
+    tags: ["Event-Driven", "Schemas", "Kafka", "Compatibility", "Integration"],
+    content: [
+      {
+        type: "p",
+        text: "An API has callers you can usually enumerate. An event has consumers you often cannot. Once an event is published to a shared topic, it is read by services built by other teams, by analytics pipelines, by an integration someone wrote for a single customer, and — if you retain the stream — by consumers that will replay it years from now. Renaming a field in that event is not a refactor. It is a breaking change to a contract with parties you may never meet.",
+      },
+      {
+        type: "p",
+        text: "Teams discover this the hard way, usually when a producer deploys a tidy-up and a downstream consumer starts silently dropping messages. Schema evolution is the discipline of making events changeable without that outcome, and most of it comes down to a small set of compatibility rules applied consistently.",
+      },
+      { type: "h2", text: "The compatibility rules" },
+      {
+        type: "p",
+        text: "Two directions matter. Backward compatibility means new consumers can read old events — important whenever a stream is replayed or retained. Forward compatibility means old consumers can read new events — important because producers and consumers never deploy at the same moment. For a shared event stream you generally want both, and that constrains the changes you can make freely.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Safe: adding an optional field with a sensible default. Old consumers ignore it; new consumers handle its absence in old events.",
+          "Safe: adding a new event type. Consumers that do not subscribe to it, or that ignore unknown types, are unaffected.",
+          "Breaking: removing or renaming a field, changing its type, or changing its meaning while keeping its name — the last is the most dangerous because no tool will catch it.",
+          "Breaking: making an optional field required, or narrowing an enumeration that consumers branch on.",
+          "Usually breaking: adding a new enumeration value. It is structurally compatible, but consumers with exhaustive switch statements will fail or misroute.",
+        ],
+      },
+      { type: "h2", text: "Enforce it with a registry and in CI" },
+      {
+        type: "p",
+        text: "Rules people have to remember will be forgotten. A schema registry — Confluent Schema Registry, AWS Glue Schema Registry, or a schemas repository with a compatibility check in CI — makes the rules mechanical. Producers register each schema version, and the registry rejects any version that violates the configured compatibility mode. For JSON events without a registry, a contract test that validates sample payloads from the new producer against every consumer's expected schema gives you much of the same protection.",
+      },
+      { type: "h2", text: "Write tolerant consumers" },
+      {
+        type: "p",
+        text: "Producers carry the burden of compatibility, but consumers can make it much easier. A tolerant reader parses only the fields it needs, ignores fields it does not recognise, applies defaults for fields that might be absent, and handles unknown enumeration values explicitly rather than crashing. When the shape of an event genuinely has to change, an upcaster that converts old versions to the current shape at the edge keeps the rest of the consumer working with a single model.",
+      },
+      {
+        type: "code",
+        lang: "ts",
+        code: "type OrderPlacedV2 = {\n  version: 2;\n  orderId: string;\n  totalMinor: number; // integer minor units\n  currency: string;\n  channel: 'web' | 'pos' | 'unknown';\n};\n\nconst KNOWN_CHANNELS = new Set(['web', 'pos']);\n\nexport function readOrderPlaced(raw: any): OrderPlacedV2 {\n  // Upcast v1 events, which carried a decimal total and no currency.\n  if (!raw.version || raw.version === 1) {\n    raw = {\n      ...raw,\n      version: 2,\n      totalMinor: Math.round(Number(raw.total) * 100),\n      currency: raw.currency ?? 'GBP',\n    };\n  }\n  return {\n    version: 2,\n    orderId: String(raw.orderId),\n    totalMinor: Number(raw.totalMinor),\n    currency: String(raw.currency),\n    // Unknown enum values degrade instead of crashing the consumer.\n    channel: KNOWN_CHANNELS.has(raw.channel) ? raw.channel : 'unknown',\n  };\n}",
+      },
+      { type: "h2", text: "When you really must break it" },
+      {
+        type: "p",
+        text: "Sometimes the old shape is simply wrong and has to go. Do not mutate the existing event in place. Publish a new version as a new event type or to a new topic, dual-publish both for a deprecation window, track which consumers still read the old one, and retire it only when that list is empty. It is slower and slightly more expensive. It is also the only approach that does not depend on every consumer team reading your announcement on the day you deploy.",
+      },
+      {
+        type: "quote",
+        text: "A published event is a promise to strangers. Keep it, version it, or retire it politely — but never quietly rewrite it.",
+      },
+      {
+        type: "p",
+        text: "Default to additive change, enforce compatibility mechanically with a registry or contract tests, and build consumers that tolerate what they do not understand. Treat any change to the meaning of an existing field as breaking, even when the type is unchanged. With those habits in place, event schemas can evolve as often as the business needs — without the cross-team incident that usually teaches the lesson.",
+      },
+    ],
+  },
+  {
+    slug: "agent-evaluation-scoring-trajectories",
+    title: "Agent Evaluation: Scoring Trajectories, Not Just Answers",
+    description:
+      "An agent that reaches the right answer by deleting the wrong record has not succeeded. How to evaluate the path an agent takes — tool choice, arguments, efficiency, safety — alongside the final outcome, and how to build a trajectory eval set that catches real regressions.",
+    date: "2026-10-22",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["AI Agents", "Evals", "LLM", "Tool Use", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "Evaluating a single model call is mostly a question of whether the output is right. Evaluating an agent is harder, because the output is only the last step of a sequence of decisions: which tools it called, with what arguments, in what order, how many times, and what it did when something failed. Two runs can end with the same correct answer while one took four sensible steps and the other took twenty, called a write tool it had no reason to touch, and retried a failing API until it hit a rate limit.",
+      },
+      {
+        type: "p",
+        text: "If your evals only score the final answer, both runs pass. In production, the second one is an incident waiting for the right input. Agent evaluation needs to score the trajectory — the full path — as well as the destination.",
+      },
+      { type: "h2", text: "What to score in a trajectory" },
+      {
+        type: "ul",
+        items: [
+          "Outcome: did the task actually succeed, judged against the end state of the environment where possible rather than the agent's own claim of success.",
+          "Safety: were any forbidden actions attempted — writes outside scope, tools not permitted for this task, data from another tenant — regardless of whether they were blocked.",
+          "Tool correctness: were the required tools called, with valid and sensible arguments, and were obviously wrong tools avoided.",
+          "Efficiency: number of steps, tokens and wall-clock time relative to a reference path. A large overrun is often the first sign of a confused agent.",
+          "Recovery: when a tool returned an error or empty result, did the agent adapt, ask for clarification, or stop cleanly rather than loop.",
+        ],
+      },
+      {
+        type: "p",
+        text: "Most of these can be checked deterministically from the trace without a model judge. Whether a write tool was called, whether arguments match a schema and the expected tenant, whether step count exceeds a budget — these are assertions over structured logs. Reserve model-graded scoring for the genuinely subjective parts, such as whether a clarifying question was reasonable or a final summary was accurate.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "from dataclasses import dataclass\n\n@dataclass\nclass Case:\n    task: str\n    required_tools: set[str]\n    forbidden_tools: set[str]\n    max_steps: int\n    check_end_state: callable  # inspects the sandbox after the run\n\ndef score(case: Case, trace: list[dict], env) -> dict:\n    calls = [s for s in trace if s['type'] == 'tool_call']\n    used = {c['name'] for c in calls}\n    errors_then_repeat = sum(\n        1 for a, b in zip(calls, calls[1:])\n        if a.get('error') and a['name'] == b['name'] and a['args'] == b['args']\n    )\n    return {\n        'success': bool(case.check_end_state(env)),\n        'safe': not (used & case.forbidden_tools),\n        'tools_ok': case.required_tools <= used,\n        'efficient': len(calls) <= case.max_steps,\n        'blind_retries': errors_then_repeat,\n    }\n\n# A case passes only if it is successful AND safe; efficiency and\n# retries are tracked as metrics with thresholds across the whole set.",
+      },
+      { type: "h2", text: "Build the environment, not just the prompts" },
+      {
+        type: "p",
+        text: "Trajectory evals need somewhere for the agent to act. That means a sandbox with fake or recorded versions of the tools: a seeded database, stubbed APIs that return realistic responses, including errors and empty results at known points. Checking the end state of that sandbox is far more reliable than asking a judge whether the agent's final message sounds successful. It also lets you include adversarial cases — a document containing an injected instruction, a tool that returns misleading data — and assert that the agent did not act on them.",
+      },
+      {
+        type: "p",
+        text: "Seed the case set from real traffic. Production traces where the agent took a strange path, a user complained, or a human had to intervene are the most valuable cases you have. Each one becomes a scenario with the environment reconstructed and the expected outcome written down, so the same failure cannot quietly return.",
+      },
+      { type: "h2", text: "Handle variance honestly" },
+      {
+        type: "p",
+        text: "Agents are less deterministic than single calls because small differences compound over many steps. Run each case several times and report pass rates rather than single pass or fail results, and treat safety differently from quality: a forbidden action in any run is a failure for the case, while efficiency can reasonably be judged on the median. Compare against a baseline rather than an absolute target, and attach example traces to every regression so the reviewer can see what changed.",
+      },
+      {
+        type: "quote",
+        text: "The right answer reached by the wrong path is a passing test today and a production incident on the first input you did not think of.",
+      },
+      {
+        type: "p",
+        text: "Start small: twenty realistic tasks in a sandbox, with deterministic checks for end state, forbidden tools and step budgets. That alone catches most of the regressions that matter when prompts, tools or models change. Add model-graded criteria and adversarial cases as the agent's responsibilities grow, and keep feeding real failures back into the set. An agent is defined by what it does, so evaluate what it does.",
+      },
+    ],
+  },
+  {
+    slug: "container-image-hygiene-small-patched-non-root",
+    title: "Container Image Hygiene: Small, Patched, Non-Root",
+    description:
+      "Most container risk is inherited from the base image and the build process. Practical habits for images that are small, rebuilt regularly, scanned, and run without root — with a multi-stage build that puts them into practice.",
+    date: "2026-10-23",
+    readingTime: "8 min read",
+    category: "Cloud",
+    tags: ["Docker", "Containers", "Security", "Supply Chain", "DevOps"],
+    content: [
+      {
+        type: "p",
+        text: "Open a typical application image and you will find much more than the application: a full operating system userland, compilers left over from building native extensions, package manager caches, a shell, curl, and perhaps a stray .env file copied in by an overly broad COPY instruction. The application runs as root because nobody changed the default. A vulnerability scanner reports dozens of findings, almost all in packages the application never uses, and the team learns to ignore the report.",
+      },
+      {
+        type: "p",
+        text: "None of this is exotic. It is the default outcome of writing a Dockerfile once and never revisiting it. Image hygiene is a small set of habits that make images smaller, easier to patch and harder to abuse, and almost all of them cost nothing at runtime.",
+      },
+      { type: "h2", text: "Small: ship only what runs" },
+      {
+        type: "p",
+        text: "Multi-stage builds are the single most effective tool. Install build dependencies, compile assets and resolve packages in a builder stage, then copy only the results into a minimal runtime stage. Pick the smallest base that runs your workload reliably — a slim distribution image, an Alpine variant if your dependencies behave well with musl, or a distroless image where no shell is needed. Fewer packages means fewer vulnerabilities to triage, faster pulls and a smaller toolkit for an attacker who gets in.",
+      },
+      {
+        type: "code",
+        lang: "docker",
+        code: "# syntax=docker/dockerfile:1\nFROM composer:2 AS vendor\nWORKDIR /app\nCOPY composer.json composer.lock ./\nRUN composer install --no-dev --no-scripts --prefer-dist --no-interaction\n\nFROM node:22-slim AS assets\nWORKDIR /app\nCOPY package.json package-lock.json ./\nRUN npm ci\nCOPY resources ./resources\nCOPY vite.config.js ./\nRUN npm run build\n\nFROM php:8.4-fpm-alpine AS runtime\nRUN docker-php-ext-install pdo_mysql opcache\nWORKDIR /var/www\nCOPY --chown=www-data:www-data . .\nCOPY --from=vendor --chown=www-data:www-data /app/vendor ./vendor\nCOPY --from=assets --chown=www-data:www-data /app/public/build ./public/build\nUSER www-data\nEXPOSE 9000\nCMD [\"php-fpm\"]",
+      },
+      {
+        type: "p",
+        text: "Pair this with a strict .dockerignore. The COPY . . line in the runtime stage is only safe because .git, node_modules, tests, local .env files and storage logs are excluded. Without that file, secrets and history end up baked into a layer, and removing them in a later instruction does not remove them from the image.",
+      },
+      { type: "h2", text: "Patched: rebuild on a schedule, not just on change" },
+      {
+        type: "p",
+        text: "An image built six months ago contains six months of unpatched base packages, even if the application code has not changed. Rebuild images regularly — weekly is a reasonable default — so that base image updates flow through, and pin base images by digest in the Dockerfile with an automated tool such as Renovate or Dependabot proposing the updates. That gives you reproducible builds and a reviewable trail of every base change.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Scan in CI and fail the build on fixable critical and high findings; report the rest without blocking, or the gate will be switched off.",
+          "Scan what is running, not just what was built: a registry or cluster scanner catches new vulnerabilities in images deployed weeks ago.",
+          "Generate an SBOM at build time so that when the next widely publicised vulnerability lands, finding affected images is a query rather than an investigation.",
+          "Sign images and verify signatures at deploy time, so the cluster only runs what your pipeline produced.",
+        ],
+      },
+      { type: "h2", text: "Non-root: assume the process will be compromised" },
+      {
+        type: "p",
+        text: "Running as root inside a container is not the same as root on the host, but it removes a layer of defence for no benefit. Set a non-root USER in the image, and then enforce it at the platform: in Kubernetes, a security context with runAsNonRoot, allowPrivilegeEscalation set to false, all capabilities dropped and a read-only root filesystem where the application allows it. Writable paths such as caches and temporary uploads become explicit volumes, which also makes it obvious where state lives.",
+      },
+      {
+        type: "quote",
+        text: "Every package in your image is code you have agreed to patch. Ship fewer of them.",
+      },
+      {
+        type: "p",
+        text: "Start with the cheapest wins: a multi-stage build, a proper .dockerignore, a non-root user and a scheduled weekly rebuild with scanning in CI. Then tighten the runtime with security contexts and signature verification. None of it is glamorous, but together these habits turn the vulnerability report from noise into a short list someone can actually act on.",
+      },
+    ],
+  },
+  {
+    slug: "legacy-code-with-ai-characterization-tests-first",
+    title: "Legacy Code With AI: Characterization Tests First",
+    description:
+      "Coding agents make it tempting to refactor legacy code you do not understand. Pinning current behaviour with characterization tests first turns that temptation into a safe, reviewable change — and gives the agent something to check its work against.",
+    date: "2026-10-24",
+    readingTime: "8 min read",
+    category: "Developer Productivity",
+    tags: ["Legacy Code", "Testing", "AI Coding", "Refactoring", "PHP"],
+    content: [
+      {
+        type: "p",
+        text: "Legacy code is code whose behaviour matters more than anyone's understanding of it. It has no tests, the original author has left, and the business depends on quirks nobody wrote down: the rounding rule applied only to one region, the null that means 'use the default' in one call site and 'do nothing' in another. Coding agents have made this code dramatically easier to change. Ask for a refactor and you get clean, typed, well-named code in minutes. Whether it still does the same thing is a separate question, and often nobody can answer it.",
+      },
+      {
+        type: "p",
+        text: "The old advice for working with legacy code still applies, and AI makes it more important rather than less: before changing behaviour you do not understand, pin it down with characterization tests. These tests do not assert what the code should do. They record what it currently does, so that any change to that behaviour is visible.",
+      },
+      { type: "h2", text: "What a characterization test is" },
+      {
+        type: "p",
+        text: "A characterization test calls the existing code with realistic inputs and asserts on whatever it returns today, including outputs that look wrong. You are not judging the code; you are building a safety net. The usual technique is a golden master: run a broad set of inputs through the current implementation, store the outputs as snapshots, and fail the test whenever a future run differs. Inputs come from production samples with personal data removed, from boundary values, and from the edge cases visible in the code's branches.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "final class InvoiceTotalsCharacterizationTest extends TestCase\n{\n    public static function cases(): iterable\n    {\n        // Inputs sampled from anonymised production invoices plus edge cases.\n        foreach (glob(__DIR__.'/fixtures/invoices/*.json') as $file) {\n            yield basename($file) => [json_decode(file_get_contents($file), true)];\n        }\n    }\n\n    #[DataProvider('cases')]\n    public function test_totals_match_recorded_behaviour(array $invoice): void\n    {\n        $result = (new LegacyInvoiceCalculator())->calculate($invoice);\n\n        $snapshot = __DIR__.'/snapshots/'.md5(json_encode($invoice)).'.json';\n        if (! file_exists($snapshot)) {\n            file_put_contents($snapshot, json_encode($result, JSON_PRETTY_PRINT));\n            $this->markTestIncomplete('Snapshot recorded; review and commit it.');\n        }\n\n        $this->assertSame(json_decode(file_get_contents($snapshot), true), $result);\n    }\n}",
+      },
+      { type: "h2", text: "Where the agent helps — and where it must not" },
+      {
+        type: "p",
+        text: "Agents are genuinely useful in building the net. They can read a tangled method and list every branch and the inputs that reach it, propose boundary values, generate fixture files, and write the test scaffolding. That work is tedious for a human and well suited to a model, because each suggestion is checked by actually running the old code.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Do let the agent enumerate branches and propose inputs that exercise each one; then measure coverage of the legacy code to confirm the net is actually wide.",
+          "Do not let the agent write the expected values by reading the code. Expected outputs come from running the existing implementation, never from the model's interpretation of it.",
+          "Do not let the agent 'fix' a snapshot that looks wrong. A surprising output is a question for the domain owner, recorded as a note, not something to correct during a refactor.",
+          "Do keep the characterization suite separate from new behavioural tests, so it is clear which tests pin legacy behaviour and which describe intended behaviour.",
+          "Do give the agent the suite as its feedback loop: refactor in small steps and run the tests after each one, rather than accepting a large rewrite and testing at the end.",
+        ],
+      },
+      { type: "h2", text: "Refactor, then change behaviour — separately" },
+      {
+        type: "p",
+        text: "With the net in place, refactoring becomes a mechanical loop. The agent restructures, the characterization tests run, and any difference is either a bug in the refactor or an unexpected dependency the code had on some quirk. Only after the structure is clean and the snapshots still pass should behaviour change, in a separate pull request, with the affected snapshots updated deliberately and the reason written in the commit message. Mixing the two is how teams end up with a beautifully typed module that charges some customers the wrong amount.",
+      },
+      {
+        type: "p",
+        text: "Expect to discover bugs while doing this. Characterization tests regularly surface outputs that are clearly wrong. Record them, raise them with whoever owns the behaviour, and resist fixing them inside the refactor. Some 'bugs' turn out to be relied upon by a downstream report or a customer's integration, and changing them is a business decision.",
+      },
+      {
+        type: "quote",
+        text: "An agent can rewrite legacy code in minutes. Only a test can tell you whether it is still the same code.",
+      },
+      {
+        type: "p",
+        text: "Before you hand a legacy module to a coding agent, spend the first session building characterization tests with it: enumerate branches, generate realistic inputs, record outputs from the real implementation, and check coverage. Then refactor in small steps against that net, and change behaviour only in its own reviewed change. The agent makes you faster; the tests are what make the speed safe.",
+      },
+    ],
+  },
+  {
+    slug: "filament-admin-panels-without-security-holes",
+    title: "Admin Panels With Filament: Fast Internal Tools Without Security Holes",
+    description:
+      "Filament makes a Laravel admin panel an afternoon's work, which is exactly why it ships with holes: unguarded panel access, missing policies, unscoped queries and mass-assignable fields. The checklist for internal tools that are quick to build and safe to expose.",
+    date: "2026-10-25",
+    readingTime: "9 min read",
+    category: "Laravel",
+    tags: ["Laravel", "Filament", "Authorization", "Security", "Internal Tools"],
+    content: [
+      {
+        type: "p",
+        text: "Filament is one of the most productive tools in the Laravel ecosystem. Point a resource at an Eloquent model and you have a searchable table, forms, filters and bulk actions in minutes. That speed is the reason internal tools built with it so often have security problems. The panel is 'only for staff', so nobody thinks hard about who staff are, which records each of them should see, or what happens when a support agent's account is compromised.",
+      },
+      {
+        type: "p",
+        text: "An admin panel is the most privileged interface in most applications. It reads every tenant's data, edits fields customers cannot, and often performs refunds, impersonation or account changes. It deserves at least the same authorization rigour as the public API, and in practice usually more.",
+      },
+      { type: "h2", text: "Gate the panel itself" },
+      {
+        type: "p",
+        text: "Outside local development, Filament expects your User model to implement the FilamentUser contract and decide in canAccessPanel who may enter. If that method returns true for every authenticated user — a common copy-paste — then any customer account with a password can reach the admin login and, depending on your resources, much more. Base access on an explicit role or permission, not on an email domain check that a self-registration flow could satisfy, and require multi-factor authentication for anyone who can enter.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "class User extends Authenticatable implements FilamentUser\n{\n    public function canAccessPanel(Panel $panel): bool\n    {\n        return match ($panel->getId()) {\n            'admin' => $this->hasRole('staff') && $this->hasVerifiedEmail(),\n            default => false,\n        };\n    }\n}\n\nclass OrderResource extends Resource\n{\n    protected static ?string $model = Order::class;\n\n    // Every table, record lookup and global search starts here.\n    public static function getEloquentQuery(): Builder\n    {\n        $user = auth()->user();\n\n        return parent::getEloquentQuery()\n            ->when(! $user->hasRole('super-admin'), fn (Builder $q) =>\n                $q->whereIn('region_id', $user->regionIds())\n            );\n    }\n}",
+      },
+      { type: "h2", text: "Policies on every resource" },
+      {
+        type: "p",
+        text: "Filament checks Laravel model policies for viewing, creating, editing and deleting records when a policy exists. When it does not, actions are generally allowed. That default is convenient during development and dangerous in production, because adding a resource for a sensitive model without a policy quietly grants full access to everyone in the panel. Write a policy for every model with a resource, and treat a missing policy as a failing test rather than a configuration choice.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Scope queries, not just pages: override the resource's base query so tables, record URLs, relation managers and global search all respect the same boundary. Hiding a navigation item does not stop someone opening a record by ID.",
+          "Authorize custom actions explicitly: a 'Refund' or 'Impersonate' action needs its own authorization check, because it is not covered by the standard create, update and delete abilities.",
+          "Restrict editable fields: build forms from an explicit list of fields, mark sensitive ones read-only or hidden by role, and keep model fillable or guarded settings tight so a crafted request cannot set a field the form does not show.",
+          "Be careful with bulk actions: a bulk delete or export over a filtered table can touch thousands of records. Authorize it, cap it, and log it.",
+          "Audit everything that changes data: who did what to which record and when, written somewhere the panel's own users cannot edit.",
+        ],
+      },
+      { type: "h2", text: "Test the boundaries, not just the forms" },
+      {
+        type: "p",
+        text: "Filament resources are Livewire components, and they can be tested like any other. The tests that matter for security are the negative ones: a user without the staff role is refused at the panel; a regional admin cannot load another region's record by URL; a support agent cannot trigger the refund action; a bulk export respects the same scope as the table. These tests are short and they catch the regressions that happen when someone adds a new resource in a hurry.",
+      },
+      {
+        type: "p",
+        text: "Finally, think about exposure. Many internal panels do not need to be on the public internet at all. Putting the panel on a separate subdomain behind a VPN, an identity-aware proxy or at least an IP allowlist removes a whole category of attack, and pairs well with shorter session lifetimes for privileged users.",
+      },
+      {
+        type: "quote",
+        text: "'It is only an internal tool' is how the most privileged screen in your application ends up with the least review.",
+      },
+      {
+        type: "p",
+        text: "Keep using Filament for what it is good at — building internal tools quickly. Just make the security defaults explicit on day one: a real canAccessPanel check, a policy for every resource, scoped base queries, authorized custom actions, an audit trail, and a handful of negative tests. That is an extra hour on the first resource and minutes on each one after, which is a small price for an admin panel you can trust.",
+      },
+    ],
+  },
+  {
+    slug: "health-checks-liveness-readiness-dependencies",
+    title: "Health Checks That Tell the Truth: Liveness, Readiness, Dependencies",
+    description:
+      "A health check that always returns 200 is useless, and one that checks every dependency can take a whole fleet down. How to design liveness, readiness and startup checks that let the orchestrator make good decisions.",
+    date: "2026-10-26",
+    readingTime: "8 min read",
+    category: "Cloud",
+    tags: ["Kubernetes", "Health Checks", "Reliability", "Observability", "Load Balancing"],
+    content: [
+      {
+        type: "p",
+        text: "Health checks are one of the few pieces of code whose output is acted on automatically. A load balancer reads them to decide where to send traffic; an orchestrator reads them to decide whether to restart a process. That makes them powerful and, when designed carelessly, dangerous. The two most common mistakes point in opposite directions: a check that returns 200 no matter what, so broken instances keep receiving traffic, and a check that tests every downstream dependency, so one slow database turns into every application instance being restarted at once.",
+      },
+      {
+        type: "p",
+        text: "The fix is to stop thinking of 'the health check' as one endpoint and to separate the questions the platform is actually asking. Kubernetes makes this explicit with liveness, readiness and startup probes, but the same distinction applies behind any load balancer.",
+      },
+      { type: "h2", text: "Three different questions" },
+      {
+        type: "ul",
+        items: [
+          "Liveness — is this process broken in a way only a restart can fix? A deadlocked worker or a wedged event loop. It should check the process itself and almost nothing else.",
+          "Readiness — should this instance receive traffic right now? It may be warming caches, draining during shutdown, or temporarily unable to reach something it cannot work without. Failing readiness removes it from rotation without killing it.",
+          "Startup — has the application finished booting? It holds off the other probes while a slow start completes, so liveness does not kill an instance that is merely loading.",
+          "Dependency status — what is the state of the database, cache, queue and third-party APIs? This belongs in metrics, dashboards and a detailed diagnostic endpoint, not in the probe that decides restarts.",
+        ],
+      },
+      { type: "h2", text: "Why liveness must not check dependencies" },
+      {
+        type: "p",
+        text: "If the liveness probe queries the database and the database becomes slow, every instance fails liveness at roughly the same time. The orchestrator restarts them all. They come back, open fresh connections to the struggling database, add load to it, fail again and get restarted again. A partial dependency outage has become a full application outage, plus a restart storm that slows recovery. Restarting your application does not fix someone else's database, so liveness should not ask about it.",
+      },
+      {
+        type: "p",
+        text: "Readiness is more nuanced. Checking a hard dependency in readiness makes sense when one instance can lose its connection while others keep theirs — removing that instance from rotation is useful. When the dependency is shared and down for everyone, failing readiness everywhere just converts degraded responses into no responses at all. Many teams settle on readiness checking only local conditions plus connectivity to dependencies the instance owns, and handle shared dependency failures in the application with timeouts, circuit breakers and degraded modes.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "containers:\n  - name: api\n    image: registry.example.com/api:1.42.0\n    ports:\n      - containerPort: 8080\n    startupProbe:\n      httpGet: { path: /livez, port: 8080 }\n      periodSeconds: 5\n      failureThreshold: 24     # allow up to 2 minutes to boot\n    livenessProbe:\n      httpGet: { path: /livez, port: 8080 }  # process only, no dependencies\n      periodSeconds: 10\n      timeoutSeconds: 2\n      failureThreshold: 3\n    readinessProbe:\n      httpGet: { path: /readyz, port: 8080 }  # local state, draining flag\n      periodSeconds: 5\n      timeoutSeconds: 2\n      failureThreshold: 2\n    lifecycle:\n      preStop:\n        exec:\n          command: [\"sh\", \"-c\", \"sleep 10\"]  # let endpoints update before SIGTERM",
+      },
+      { type: "h2", text: "Making the checks honest" },
+      {
+        type: "p",
+        text: "A liveness endpoint that returns a constant 200 from a framework route proves only that the HTTP server can answer, which is a reasonable minimum but not much more. Better liveness checks confirm that the thing the process exists to do is still progressing: a queue worker updating a heartbeat timestamp on each loop, for example, with liveness failing if the heartbeat is stale. Keep probe handlers fast and free of heavy work — a probe that times out under load will fail exactly when the instance is busiest, which is the worst moment to restart it.",
+      },
+      {
+        type: "p",
+        text: "Readiness should also reflect shutdown. When an instance receives a termination signal, it should start failing readiness and keep serving in-flight requests while load balancers notice and stop routing new ones. Without that, every deployment drops a handful of requests, and nobody can explain the small error spike that coincides with each release.",
+      },
+      {
+        type: "quote",
+        text: "A health check is an instruction to a robot. Make sure the robot's only available action — restart or remove — actually fixes the problem you are reporting.",
+      },
+      {
+        type: "p",
+        text: "Separate the questions: liveness for a broken process, readiness for whether to send traffic, startup for slow boots, and dependency status in observability rather than probes. Test the failure modes deliberately — slow the database in staging and watch what the orchestrator does. If the answer is 'restart everything', the checks are telling the platform the wrong story.",
+      },
+    ],
+  },
+  {
+    slug: "honouring-delete-my-data-across-every-system",
+    title: "Honouring 'Delete My Data' Across Every System",
+    description:
+      "An erasure request touches the primary database, replicas, search indexes, caches, analytics, backups, logs, vector stores and third parties. How to design a deletion workflow that is complete, auditable and resilient to partial failure.",
+    date: "2026-10-27",
+    readingTime: "9 min read",
+    category: "Security",
+    tags: ["Privacy", "GDPR", "Data Deletion", "Compliance", "Architecture"],
+    content: [
+      {
+        type: "p",
+        text: "Deleting a user's row from the users table takes one query. Honouring a request to delete their personal data takes considerably more, because by the time the request arrives that data has been copied everywhere: into search indexes, caches, analytics warehouses, event streams, log aggregators, embeddings in a vector store, support tools, email providers and nightly backups. Under GDPR and similar regimes, the obligation covers personal data the organisation holds, not just the copy that happens to be easiest to reach.",
+      },
+      {
+        type: "p",
+        text: "Most teams discover the scale of this when the first formal request arrives and someone has to work out, under a statutory deadline, where the data actually lives. The better position is to treat erasure as a designed workflow from the start: a data map, an orchestrated process with per-system tasks, and a record that proves what was done.",
+      },
+      { type: "h2", text: "Start with a data map" },
+      {
+        type: "p",
+        text: "You cannot delete what you have not found. Maintain an inventory of every system that stores personal data, what identifiers link records to a person, and who owns deletion for that system. Include the easy-to-forget places: derived data such as recommendations and embeddings, files in object storage, rows in other tenants' audit logs, exports sitting in a shared drive, and processors such as payment, email and CRM providers. The map is a living document; adding a new data store without updating it should fail review.",
+      },
+      { type: "h2", text: "Orchestrate deletion as tracked tasks" },
+      {
+        type: "p",
+        text: "A single synchronous 'delete everything' call will fail partway through, because one of a dozen systems will be slow or unavailable. Model each erasure request as a parent record with one task per system, processed by idempotent workers that can retry independently. The request is complete only when every task is complete, and the status is visible to whoever is accountable for responding to the person who asked.",
+      },
+      {
+        type: "code",
+        lang: "sql",
+        code: "CREATE TABLE erasure_requests (\n    id            uuid PRIMARY KEY,\n    subject_ref   text NOT NULL,          -- pseudonymous reference, not the email\n    received_at   timestamptz NOT NULL,\n    due_at        timestamptz NOT NULL,\n    status        text NOT NULL DEFAULT 'pending',\n    completed_at  timestamptz\n);\n\nCREATE TABLE erasure_tasks (\n    request_id    uuid NOT NULL REFERENCES erasure_requests(id),\n    system        text NOT NULL,          -- 'primary_db', 'search', 'crm', ...\n    status        text NOT NULL DEFAULT 'pending',\n    attempts      int  NOT NULL DEFAULT 0,\n    last_error    text,\n    completed_at  timestamptz,\n    PRIMARY KEY (request_id, system)\n);\n\n-- Overdue or stuck work, for the daily review\nSELECT r.id, t.system, t.status, t.attempts, r.due_at\nFROM erasure_tasks t\nJOIN erasure_requests r ON r.id = t.request_id\nWHERE t.status <> 'done' AND r.due_at < now() + interval '7 days'\nORDER BY r.due_at;",
+      },
+      { type: "h2", text: "The hard places" },
+      {
+        type: "ul",
+        items: [
+          "Backups: rewriting immutable backups is rarely practical. A common, defensible approach is to keep backups on a short retention period, record pending erasures, and reapply them automatically if a backup is ever restored.",
+          "Event streams and logs: avoid writing raw personal data into long-retention logs and streams in the first place. Where it is unavoidable, use short retention or crypto-shredding — encrypt per-subject data with a per-subject key and delete the key.",
+          "Analytics and warehouses: key analytical data on pseudonymous identifiers so erasure means deleting the mapping and a small number of attributes, not rewriting history tables.",
+          "Vector stores and search indexes: delete by document or subject metadata, and remember that chunks, embeddings and cached answers derived from personal data are personal data too.",
+          "Third parties: call the processor's deletion API where one exists, record the response, and track the ones that require a manual request as tasks with owners.",
+        ],
+      },
+      {
+        type: "p",
+        text: "Not everything can or should be deleted. Invoices, tax records and some fraud and security data are subject to legal retention obligations. The workflow should apply those exceptions explicitly — retaining the minimum fields, restricting access, and recording the legal basis — rather than leaving them as accidental leftovers. That distinction is a policy decision for legal and privacy owners; engineering's job is to implement it precisely.",
+      },
+      {
+        type: "quote",
+        text: "Deleting a user is one query. Deleting their data is an inventory of every place you were careless enough to copy it.",
+      },
+      {
+        type: "p",
+        text: "Build the data map, model erasure as a parent request with idempotent per-system tasks, and design new data stores so deletion is cheap: pseudonymous keys, short retention, per-subject encryption where data must flow widely. Keep an audit record of what was deleted, where and when, without storing the personal data itself in that record. When the next request arrives, the answer should come from a dashboard, not from a week of searching.",
+      },
+    ],
+  },
+  {
+    slug: "semantic-caching-for-llms-when-it-lies",
+    title: "Semantic Caching for LLMs: When It Works and When It Lies",
+    description:
+      "Caching LLM responses by meaning rather than exact text can cut cost and latency sharply — and can also serve one user's answer to a different question. Where semantic caching is safe, where it is not, and the guardrails that keep it honest.",
+    date: "2026-10-28",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["LLM", "Caching", "Embeddings", "Cost", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "Exact-match caching of LLM responses rarely gets a good hit rate, because people almost never type the same question the same way twice. Semantic caching fixes that by embedding each incoming prompt, searching for a previous prompt that is close enough in meaning, and returning its stored answer. On the right workload the effect is striking: common questions answer instantly and the model is called only for genuinely new ones.",
+      },
+      {
+        type: "p",
+        text: "The problem is the phrase 'close enough'. Embedding similarity measures whether two texts are about the same thing, not whether they have the same answer. 'How do I cancel my subscription?' and 'How do I cancel my subscription without losing my data?' are very similar vectors with materially different answers. A semantic cache that cannot tell them apart is not saving money. It is confidently answering the wrong question.",
+      },
+      { type: "h2", text: "Where it works" },
+      {
+        type: "p",
+        text: "Semantic caching is a good fit when the answer depends only on the question, the question space is narrow and repetitive, and a slightly imperfect match is acceptable. Public FAQ-style assistants, product documentation search, and internal help desks about stable policies fit this description. So do expensive preprocessing steps whose output is a classification rather than prose, such as routing a request to a category, where near-duplicate inputs genuinely deserve the same result.",
+      },
+      { type: "h2", text: "Where it lies" },
+      {
+        type: "ul",
+        items: [
+          "Personalised or account-specific answers: 'What is my balance?' is the same sentence for every user and must never share a cached answer across them.",
+          "Negation and qualifiers: small words — not, without, except, before — change the answer while barely moving the embedding.",
+          "Numbers, dates and identifiers: 'refund for order 1182' and 'refund for order 1183' are near-identical vectors about different orders.",
+          "Fast-changing facts: stock levels, prices, incident status and anything retrieved from live data go stale faster than a similarity score can notice.",
+          "Multi-turn conversations: the same final message means different things depending on what came before it, so caching on the last turn alone is wrong.",
+        ],
+      },
+      { type: "h2", text: "Guardrails that keep it honest" },
+      {
+        type: "p",
+        text: "The safe designs share a few properties. The cache key is partitioned by everything that changes the answer — tenant, user where relevant, locale, prompt version and model — so similarity search only ever compares like with like. The similarity threshold is high and tuned on labelled pairs from real traffic, not picked by intuition. Volatile inputs such as identifiers and numbers are extracted and matched exactly alongside the vector search. And entries expire, with invalidation tied to the underlying content changing.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "import re\n\nTHRESHOLD = 0.95  # tune on labelled same-answer / different-answer pairs\nENTITY = re.compile(r'\\b(?:[A-Z]{2,}-?\\d+|\\d{3,})\\b')\n\ndef cache_scope(ctx) -> str:\n    # Only compare prompts whose answers could legitimately be shared.\n    return f'{ctx.tenant_id}:{ctx.locale}:{ctx.prompt_version}:{ctx.model}'\n\ndef lookup(query: str, ctx, store, embed):\n    if ctx.personalised or ctx.turn_index > 0:\n        return None  # never cache user-specific or mid-conversation answers\n    entities = sorted(ENTITY.findall(query))\n    hit = store.nearest(\n        vector=embed(query),\n        namespace=cache_scope(ctx),\n        filter={'entities': entities},  # identifiers must match exactly\n    )\n    if hit and hit.score >= THRESHOLD and not hit.expired:\n        ctx.metrics.increment('semcache.hit')\n        return hit.answer\n    ctx.metrics.increment('semcache.miss')\n    return None",
+      },
+      {
+        type: "p",
+        text: "Measure the cache's correctness, not just its hit rate. Sample cache hits regularly, re-run them through the model, and have a judge or a human compare the cached answer with the fresh one. The rate of materially different answers is the number that tells you whether your threshold is right. A high hit rate with a rising mismatch rate means the cache is getting cheaper by getting worse.",
+      },
+      {
+        type: "p",
+        text: "Also compare against the alternatives. Provider prompt caching reduces the cost of long, repeated prompt prefixes with no risk of serving the wrong answer, and exact-match caching on normalised input is safe for deterministic tasks. Semantic caching sits on top of those for the subset of traffic where meaning-level reuse is genuinely correct.",
+      },
+      {
+        type: "quote",
+        text: "Similarity tells you two questions are about the same thing. It cannot tell you they have the same answer.",
+      },
+      {
+        type: "p",
+        text: "Use semantic caching where answers depend only on the question and the domain is narrow and stable. Partition the cache by everything that affects the answer, match identifiers exactly, keep the threshold high and tuned on real pairs, exclude personalised and multi-turn requests, and audit hits continuously. Done that way, it is a useful optimisation. Done casually, it is a very efficient way to give users confident answers to questions they did not ask.",
+      },
+    ],
+  },
+  {
+    slug: "batch-or-stream-processing-model-for-business-data",
+    title: "Batch or Stream: Choosing a Processing Model for Business Data",
+    description:
+      "Streaming is not automatically more modern than batch, and batch is not automatically simpler. How to choose between them based on latency needs, correctness, reprocessing and operational cost — and when a hybrid is the honest answer.",
+    date: "2026-10-29",
+    readingTime: "9 min read",
+    category: "System Design",
+    tags: ["Data Engineering", "Streaming", "Batch Processing", "Kafka", "Architecture"],
+    content: [
+      {
+        type: "p",
+        text: "A request for 'real-time' data often arrives with no real-time requirement behind it. Someone wants a dashboard to be fresher than yesterday's, and the conversation jumps straight to Kafka, stream processors and exactly-once semantics. Months later the team is operating a streaming platform to update a report that people look at twice a day. The opposite mistake happens too: a nightly batch job drives a fraud check or a stock reservation that genuinely needs to react in seconds, and the business absorbs a day of losses before anyone notices.",
+      },
+      {
+        type: "p",
+        text: "The choice between batch and stream should come from the business consequence of latency, not from which architecture feels more current. Both are legitimate tools with very different costs.",
+      },
+      { type: "h2", text: "Ask what latency is worth" },
+      {
+        type: "p",
+        text: "Start by asking what happens if the result is an hour late, then a minute late, then a second late. For most reporting, reconciliation, billing and analytics, an hour is fine and a day is often acceptable. For fraud detection, inventory reservation, alerting, user-facing notifications and operational dashboards that drive immediate action, minutes or seconds matter. The latency that changes a decision or an outcome is the requirement; anything faster is cost without benefit.",
+      },
+      { type: "h2", text: "What each model costs you" },
+      {
+        type: "ul",
+        items: [
+          "Batch is easy to reason about: a bounded input, a deterministic output, and a job that can be rerun from scratch when the logic changes. Correctness and reprocessing are cheap. Latency is the price.",
+          "Streaming gives low latency but turns simple questions into hard ones: late and out-of-order events, windowing, state stores, exactly-once delivery, and consumer lag all become your problem.",
+          "Reprocessing is where streaming hurts most. Fixing a bug in a batch job means rerunning it; fixing a bug in a stream processor means replaying retained history through new code, if you kept the history.",
+          "Operationally, batch failures are visible and retryable; streaming failures are often silent lag that grows until someone notices data is hours old.",
+          "Micro-batching — running small batches every few minutes — sits in the middle, and is the right answer more often than either extreme.",
+        ],
+      },
+      { type: "h2", text: "Write logic once, run it in either mode" },
+      {
+        type: "p",
+        text: "A practical technique is to keep the business logic as pure functions over records, independent of how the records arrive. The same transformation can then run in a nightly batch over a table, in a micro-batch over the last five minutes, or in a stream consumer. That makes it possible to start with batch, move a specific flow to streaming when the business case appears, and backfill or reconcile with the batch path at any time.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "from dataclasses import dataclass\nfrom decimal import Decimal\nfrom typing import Iterable, Iterator\n\n@dataclass(frozen=True)\nclass Payment:\n    id: str\n    account_id: str\n    amount: Decimal\n    country: str\n\ndef flag_suspicious(payments: Iterable[Payment], limits: dict) -> Iterator[dict]:\n    # Pure business logic: no knowledge of files, topics or schedules.\n    for p in payments:\n        if p.amount > limits.get(p.country, limits['default']):\n            yield {'payment_id': p.id, 'reason': 'over_country_limit'}\n\n# Batch: rerun over a whole day whenever the rules change.\ndef run_batch(day, repo, sink, limits):\n    sink.write_many(flag_suspicious(repo.payments_for(day), limits))\n\n# Stream: the same function over each consumed message.\ndef on_message(msg, sink, limits):\n    for flag in flag_suspicious([Payment(**msg)], limits):\n        sink.write_idempotent(key=flag['payment_id'], value=flag)",
+      },
+      { type: "h2", text: "When a hybrid is the honest answer" },
+      {
+        type: "p",
+        text: "Many real systems end up with both: a streaming path that produces a fast, approximately correct view, and a batch path that periodically recomputes the authoritative result and corrects any drift. Billing is a classic example — usage is shown to customers in near real time, but the invoice is generated from a batch reconciliation over the complete, deduplicated data. Being explicit about which output is authoritative avoids the argument that otherwise happens when the two numbers disagree.",
+      },
+      {
+        type: "p",
+        text: "Before adding streaming infrastructure, also check whether the database can do the job. Change data capture into a queue, or a scheduled query every minute against a well-indexed table, meets many 'real-time' requirements with a fraction of the operational load.",
+      },
+      {
+        type: "quote",
+        text: "Real-time is a business requirement with a price, not a property of modern architecture. Ask what a minute of latency costs before you pay to remove it.",
+      },
+      {
+        type: "p",
+        text: "Default to batch or micro-batch for reporting, reconciliation and anything where minutes are acceptable. Use streaming for flows where seconds change an outcome, and keep the logic as pure functions so either mode can run it. Keep a batch path for reprocessing even when you stream, and always be clear which result is the source of truth.",
+      },
+    ],
+  },
+  {
+    slug: "writing-customer-facing-incident-updates",
+    title: "Writing Customer-Facing Incident Updates",
+    description:
+      "During an incident, customers judge you as much by what you tell them as by how quickly you fix it. How to write status updates that are timely, specific and honest — without speculation, jargon or promises you cannot keep.",
+    date: "2026-10-30",
+    readingTime: "8 min read",
+    category: "Engineering",
+    tags: ["Incident Response", "Communication", "Customer Success", "Status Pages", "Reliability"],
+    content: [
+      {
+        type: "p",
+        text: "In the first twenty minutes of an incident, engineers focus on the fix, and that is right. But customers cannot see the fix. What they see is the status page, the banner in the app, and whatever their account manager says on the phone. If those channels are silent, vague or contradictory, customers assume the worst, flood support, and remember the silence long after the outage itself is forgotten. Communication is part of incident response, not an afterthought to it.",
+      },
+      {
+        type: "p",
+        text: "Good incident updates are not about tone or polish. They are about answering the questions customers actually have, at a predictable cadence, without saying anything that will later turn out to be wrong.",
+      },
+      { type: "h2", text: "What customers need to know" },
+      {
+        type: "ul",
+        items: [
+          "Impact in their terms: which features are affected and what users will experience — 'invoices cannot be sent', not 'elevated 5xx rates on the billing service'.",
+          "Scope: who is affected, if you know. 'Some customers in the EU region' is more useful than silence, and 'all customers' is better said plainly than implied.",
+          "What they should do: wait, retry later, use a workaround, avoid re-submitting payments. Clear guidance prevents duplicate actions that make cleanup harder.",
+          "When they will hear next: a specific time for the next update, which you then keep even if the only news is that work is ongoing.",
+          "Whether data is at risk: if there is any question of data loss or exposure, say what you know and what you are checking, and involve the people responsible for security and legal notifications early.",
+        ],
+      },
+      { type: "h2", text: "A structure that works under pressure" },
+      {
+        type: "p",
+        text: "Nobody writes well during an outage, so do not rely on it. Agree a template in advance, assign a communications owner who is not the person debugging, and make the first update quick and short. Acknowledging a problem within minutes, even before you understand it, is far better than a thorough update an hour later.",
+      },
+      {
+        type: "code",
+        lang: "markdown",
+        code: "**Investigating** — 14:05 UTC\nWe are investigating failures when sending invoices from the Billing page.\nUsers may see an error after clicking Send. Viewing and editing invoices is\nnot affected. Please do not resend invoices that failed; we will confirm\nwhich were delivered. Next update by 14:35 UTC.\n\n**Identified** — 14:32 UTC\nWe have identified the cause as a failure in our email delivery integration\nand are rerouting sending. Invoices are not lost; failed sends are queued.\nNext update by 15:00 UTC.\n\n**Resolved** — 15:10 UTC\nInvoice sending has been working normally since 14:51 UTC. Invoices queued\nbetween 13:48 and 14:51 UTC were sent automatically by 15:05 UTC. No action\nis needed. We will publish a summary of the cause and our follow-up actions\nwithin five working days.",
+      },
+      { type: "h2", text: "What to leave out" },
+      {
+        type: "p",
+        text: "Do not speculate about the cause before you are confident. A guess that turns out wrong costs credibility at exactly the moment you need it. 'We have identified the cause' is a strong statement; use it only when it is true. Avoid internal jargon, service names and blame — customers do not care which team owns the failing component, and naming a vendor publicly mid-incident is rarely wise. Never promise a resolution time unless you are genuinely sure; promise the next update time instead, because that one you control.",
+      },
+      {
+        type: "p",
+        text: "Keep every channel consistent. The status page is the source of truth, and the in-app banner, support macros and account manager messages should link to it or quote it rather than improvise their own versions. Contradictory messages from different parts of the company do more damage than a terse but consistent one.",
+      },
+      { type: "h2", text: "After it is resolved" },
+      {
+        type: "p",
+        text: "The resolution message should state when service recovered, what happened to any affected work, and whether customers need to take action. For significant incidents, follow with a written summary: what happened, the impact, why it happened, and what is changing to prevent it. Write it for a customer's engineering lead, not for your internal postmortem — clear, factual, free of defensiveness, and specific about follow-up actions you are committing to.",
+      },
+      {
+        type: "quote",
+        text: "Customers forgive outages far more readily than they forgive being left to guess. Promise the next update, not the fix — and then keep the promise.",
+      },
+      {
+        type: "p",
+        text: "Prepare before you need it: an agreed template, a named communications role in your incident process, pre-approved wording for common scenarios, and a rule for update cadence. During the incident, lead with impact in customer terms, tell people what to do, never speculate, and always say when they will hear next. That discipline turns an outage from a loss of trust into evidence that you are a team worth relying on.",
+      },
+    ],
+  },
+  {
+    slug: "distributed-cron-scheduled-jobs-run-once-per-window",
+    title: "Distributed Cron: Scheduled Jobs That Run Once Per Window",
+    description:
+      "When a scheduler runs on every instance, scheduled jobs run on every instance. How to guarantee a job runs once per window across a fleet — with database claims, leases and idempotent work — and what to do about missed windows.",
+    date: "2026-10-31",
+    readingTime: "9 min read",
+    category: "Distributed Systems",
+    tags: ["Scheduling", "Cron", "Distributed Locks", "Idempotency", "Laravel"],
+    content: [
+      {
+        type: "p",
+        text: "Cron is simple on one server. Then the application is scaled to three instances behind a load balancer, each running the same scheduler, and the daily invoice job runs three times at midnight. Customers receive three reminder emails, the report table has triplicate rows, and someone adds a quick fix: only run the scheduler on 'the first' instance. That works until the first instance is replaced during a deployment at 23:59 and the job does not run at all.",
+      },
+      {
+        type: "p",
+        text: "The real requirement is usually not 'run on one machine' but 'run exactly once per scheduling window, even as machines come and go'. That requirement can be met reliably, but only by combining a coordination mechanism with jobs that tolerate the cases the mechanism cannot rule out.",
+      },
+      { type: "h2", text: "Options for coordination" },
+      {
+        type: "ul",
+        items: [
+          "A single dedicated scheduler process: simple and common, but it becomes a single point of failure unless the platform restarts it quickly. Kubernetes CronJobs follow this model, with concurrencyPolicy controlling overlapping runs.",
+          "A short-lived lock in a shared cache: Laravel's onOneServer does this, requiring a cache driver shared by all servers. It prevents simultaneous runs, but a lock that expires does not by itself prove the window was handled.",
+          "A database claim per window: insert a row keyed on the job name and the window start, guarded by a unique constraint. Whoever inserts it runs the job; everyone else skips. The record also becomes the history of what ran.",
+          "A managed scheduler: a cloud scheduling service that invokes an endpoint or enqueues a message once per schedule, moving the coordination problem to someone else's infrastructure.",
+        ],
+      },
+      { type: "h2", text: "Claiming a window in the database" },
+      {
+        type: "p",
+        text: "The claim approach is attractive because it uses a system you already trust for consistency and produces an audit trail for free. Every instance can run the scheduler; each computes the current window and tries to claim it. Only one insert succeeds. The row records who claimed it and when it finished, which makes stuck runs and missed windows easy to query.",
+      },
+      {
+        type: "code",
+        lang: "sql",
+        code: "CREATE TABLE scheduled_runs (\n    job_name      text        NOT NULL,\n    window_start  timestamptz NOT NULL,\n    claimed_by    text        NOT NULL,\n    claimed_at    timestamptz NOT NULL DEFAULT now(),\n    finished_at   timestamptz,\n    status        text        NOT NULL DEFAULT 'running',\n    PRIMARY KEY (job_name, window_start)\n);\n\n-- Each instance attempts the claim; exactly one gets a row back.\nINSERT INTO scheduled_runs (job_name, window_start, claimed_by)\nVALUES ('send-invoice-reminders', date_trunc('day', now()), :instance_id)\nON CONFLICT (job_name, window_start) DO NOTHING\nRETURNING job_name;\n\n-- Windows claimed but not finished within the expected time\nSELECT job_name, window_start, claimed_by, claimed_at\nFROM scheduled_runs\nWHERE status = 'running' AND claimed_at < now() - interval '2 hours';",
+      },
+      { type: "h2", text: "What the lock cannot guarantee" },
+      {
+        type: "p",
+        text: "No coordination mechanism gives exactly-once execution by itself. The instance that claimed the window can crash halfway through, leaving the job half done and the window marked as running. A lease-based lock can expire while a slow job is still working, letting a second instance start. So the work inside the job must be idempotent at the item level: each reminder recorded with its own unique key before or as it is sent, each report row upserted rather than inserted, each batch able to resume from where it stopped. The window claim prevents the common duplicate; item-level idempotency handles the rare one.",
+      },
+      {
+        type: "p",
+        text: "For long jobs, prefer the scheduler only deciding that a run should happen and enqueueing a job, rather than doing the work itself. The queue then provides retries, timeouts and visibility, and the scheduler's tick stays fast and predictable.",
+      },
+      { type: "h2", text: "Missed windows are a decision, not an accident" },
+      {
+        type: "p",
+        text: "If every scheduler was down at midnight, should the job run at 00:20 when one returns, or wait until tomorrow? For invoice reminders, catching up is probably right. For a 'send today's digest' job, running at noon might confuse users. Decide per job, implement catch-up by checking for unclaimed recent windows on startup, and alert when a window passes without a completed run. Monitoring that a job did not run is as important as monitoring that it failed.",
+      },
+      {
+        type: "quote",
+        text: "The lock decides who runs the job. Idempotency decides what happens when the lock is wrong — and eventually it will be.",
+      },
+      {
+        type: "p",
+        text: "Pick one coordination mechanism, preferably one that leaves a record per window, and make the work inside every scheduled job idempotent at the item level. Decide explicitly how each job handles missed windows, and alert on absence as well as failure. With those three pieces in place, scaling from one instance to twenty stops changing how many times midnight happens.",
+      },
+    ],
+  },
+  {
+    slug: "billing-systems-usage-metering-proration-invoices",
+    title: "Billing Systems: Usage Metering, Proration, Invoices That Reconcile",
+    description:
+      "Billing bugs are the ones customers find first and forgive last. How to meter usage idempotently, prorate plan changes predictably, and produce invoices that reconcile against the ledger every single time.",
+    date: "2026-11-01",
+    readingTime: "9 min read",
+    category: "System Design",
+    tags: ["Billing", "Metering", "Idempotency", "Data Modelling", "SaaS"],
+    content: [
+      {
+        type: "p",
+        text: "Billing starts as a Stripe integration and a monthly cron job. It stays that way until the product adds a usage-based component, an annual plan with mid-cycle upgrades, and a finance team that wants the numbers on the invoice to match the numbers in the data warehouse. At that point the cron job becomes the most feared code in the repository, because every bug in it is a customer email that starts with 'we were charged twice'.",
+      },
+      {
+        type: "p",
+        text: "The good news is that billing is a well-understood domain. The failures are almost always the same three: usage that is counted twice or not at all, proration that nobody can explain, and invoices that are computed from live tables instead of from an immutable record. Design against those three and the system becomes boring, which is exactly what billing should be.",
+      },
+      { type: "h2", text: "Meter usage as an append-only ledger" },
+      {
+        type: "p",
+        text: "Usage events must be idempotent from the moment they are produced. Every event carries a stable idempotency key generated by the producer — the job ID, the request ID, the message ID — and the ledger enforces uniqueness on it. Retries, duplicate queue deliveries and replayed webhooks then collapse into a single row instead of a second charge. Never update usage rows in place; corrections are new rows with negative quantities and a reason, so the history explains itself.",
+      },
+      {
+        type: "code",
+        lang: "sql",
+        code: "CREATE TABLE usage_events (\n    id              BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,\n    tenant_id       BIGINT UNSIGNED NOT NULL,\n    meter           VARCHAR(64)     NOT NULL,\n    quantity        DECIMAL(18, 6)  NOT NULL,\n    occurred_at     DATETIME(6)     NOT NULL,\n    idempotency_key VARCHAR(128)    NOT NULL,\n    reason          VARCHAR(255)    NULL,\n    created_at      DATETIME(6)     NOT NULL DEFAULT CURRENT_TIMESTAMP(6),\n    UNIQUE KEY uq_usage_idem (tenant_id, idempotency_key),\n    KEY ix_usage_period (tenant_id, meter, occurred_at)\n);\n\n-- Producers insert and ignore duplicates; a retry is a no-op.\nINSERT INTO usage_events (tenant_id, meter, quantity, occurred_at, idempotency_key)\nVALUES (?, 'api_calls', 1, ?, ?)\nON DUPLICATE KEY UPDATE id = id;\n\n-- The invoice reads a closed period, never 'now'.\nSELECT meter, SUM(quantity) AS billable\nFROM usage_events\nWHERE tenant_id = ? AND occurred_at >= ? AND occurred_at < ?\nGROUP BY meter;",
+      },
+      {
+        type: "p",
+        text: "Note the half-open interval on the period query. Inclusive end dates are how a usage event at exactly midnight ends up on two invoices. Pick one convention — start inclusive, end exclusive — and use it everywhere, including in the warehouse.",
+      },
+      { type: "h2", text: "Proration you can explain on the phone" },
+      {
+        type: "p",
+        text: "When a customer upgrades on day 12 of a 30-day cycle, someone in support will need to explain the resulting line items. If the answer is 'the algorithm decided', the design is wrong. Prorate in whole units that a human can reproduce — usually seconds or days of the period — and record each proration as explicit line items: a credit for the unused portion of the old plan and a charge for the remaining portion of the new one.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Store money as integers in the smallest currency unit, and decide the rounding rule once. Rounding each line and then summing gives a different total from summing and then rounding; pick one and document it.",
+          "Snapshot the price at the time of the change. Prorating against today's price list when the customer signed up on last year's is a guaranteed dispute.",
+          "Make downgrades take effect at the period end by default. Immediate downgrades create credits, and credits create support tickets.",
+          "Cap the number of plan changes per period, or collapse rapid changes into one. A customer toggling plans ten times in an afternoon should not produce twenty line items.",
+          "Handle time zones explicitly: a billing period belongs to one zone, stored with the subscription, not inferred from the server.",
+        ],
+      },
+      { type: "h2", text: "Invoices are snapshots, not views" },
+      {
+        type: "p",
+        text: "An invoice must be a frozen document. Once finalised, its line items, prices, tax amounts and totals are stored, not recomputed. If a product's price changes next month, the old invoice must still render the old number. Teams that render invoices from live subscription and price tables eventually discover that their historical PDFs have quietly changed, and that is a compliance problem, not just a bug.",
+      },
+      {
+        type: "p",
+        text: "The lifecycle should be explicit: draft, finalised, paid, void. Drafts can be regenerated freely. Finalisation is a single transaction that locks the usage period, writes the line items and assigns a sequential invoice number. Anything after that is an adjustment — a credit note or a new invoice — never an edit. Payment provider calls happen after the transaction commits, keyed by the invoice ID, so a retry cannot charge twice.",
+      },
+      {
+        type: "quote",
+        text: "If you cannot rebuild last March's invoice from the ledger and get the same total to the penny, you do not have a billing system. You have a billing estimate.",
+      },
+      { type: "h2", text: "Reconcile every night" },
+      {
+        type: "p",
+        text: "Reconciliation is the test suite that runs against production. A nightly job sums usage per tenant per period from the ledger, compares it with the finalised invoice lines, compares invoice totals with payments recorded by the provider, and reports every mismatch. The first run usually finds something. That is the point: it is far cheaper to discover a drift between your ledger and your payment provider from a report than from an auditor.",
+      },
+      {
+        type: "p",
+        text: "The practical takeaway is to treat billing as an accounting system with code attached, not as a feature with some money in it. Append-only usage with idempotency keys, explicit proration line items, frozen invoices and a nightly reconciliation job will not make billing exciting. They will make it boring, explainable and correct, which is the only standard customers care about.",
+      },
+    ],
+  },
+  {
+    slug: "laravel-events-and-listeners-decoupling",
+    title: "Laravel Events and Listeners: Decoupling Without Losing the Plot",
+    description:
+      "Events make Laravel code feel decoupled until nobody can say what happens when an order is placed. When events earn their place, when a direct call is clearer, and how to keep listeners safe with transactions and queues.",
+    date: "2026-11-02",
+    readingTime: "8 min read",
+    category: "Laravel",
+    tags: ["Laravel", "Events", "Queues", "Architecture", "PHP"],
+    content: [
+      {
+        type: "p",
+        text: "Events are one of Laravel's most pleasant features and one of its most abused. A controller dispatches OrderPlaced, and somewhere five listeners send an email, update a search index, notify a warehouse, award loyalty points and write an audit row. The controller is beautifully short. The problem is that the behaviour of placing an order is now spread across a directory, discovered at runtime, and impossible to read top to bottom.",
+      },
+      {
+        type: "p",
+        text: "Decoupling is only a benefit when the decoupled parts genuinely do not need to know about each other. When they do, an event just hides the dependency. The skill is knowing which side of that line a piece of behaviour sits on, and then making the event path robust against transactions, retries and failures.",
+      },
+      { type: "h2", text: "When an event earns its place" },
+      {
+        type: "ul",
+        items: [
+          "Side effects that the core use case does not depend on: sending a confirmation email, refreshing a cache, pushing to an analytics pipeline. If the listener fails, the order is still placed.",
+          "Cross-module notifications where the emitter should not import the receiver. Billing reacting to a subscription change in another bounded context is a good fit.",
+          "Behaviour that varies by deployment or tenant configuration, where listeners are registered conditionally.",
+          "Not a good fit: steps that must succeed for the operation to be valid, such as reserving stock or charging a card. Those belong in the service method as direct, visible calls inside the transaction.",
+        ],
+      },
+      {
+        type: "p",
+        text: "A useful test is to read the service method aloud. If a new engineer would be surprised that placing an order also does X, and X is essential, X should not be in a listener.",
+      },
+      { type: "h2", text: "The transaction trap" },
+      {
+        type: "p",
+        text: "The most common event bug in Laravel applications is a queued listener that runs before the transaction that dispatched it has committed. The job is pushed to Redis, a worker picks it up within milliseconds, loads the order by ID and finds nothing — or finds the old state. The fix is to make the listener wait for the commit. Laravel supports this directly: implementing ShouldHandleEventsAfterCommit on the listener defers it until the surrounding database transaction commits, and discards it if the transaction rolls back.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "use Illuminate\\Contracts\\Events\\ShouldHandleEventsAfterCommit;\nuse Illuminate\\Contracts\\Queue\\ShouldQueue;\nuse Illuminate\\Queue\\InteractsWithQueue;\n\nfinal class SendOrderConfirmation implements ShouldQueue, ShouldHandleEventsAfterCommit\n{\n    use InteractsWithQueue;\n\n    public int $tries = 5;\n    public array $backoff = [10, 60, 300];\n\n    public function handle(OrderPlaced $event): void\n    {\n        $order = Order::find($event->orderId);\n\n        // Idempotent: a redelivered job must not send a second email.\n        if ($order === null || $order->confirmation_sent_at !== null) {\n            return;\n        }\n\n        Mail::to($order->customer_email)->send(new OrderConfirmationMail($order));\n        $order->forceFill(['confirmation_sent_at' => now()])->save();\n    }\n}",
+      },
+      {
+        type: "p",
+        text: "Notice that the event carries an ID, not the model. Serialising a whole Eloquent model into an event payload invites stale data and large queue messages; the listener should load the current state when it runs. And the listener is idempotent, because queues deliver at least once. Without that guard, a worker crash after sending the mail but before acknowledging the job sends the customer a second confirmation.",
+      },
+      { type: "h2", text: "Keeping the plot visible" },
+      {
+        type: "p",
+        text: "Automatic event discovery is convenient and makes the system harder to read. Whether you use discovery or explicit registration, make the wiring inspectable: the event:list Artisan command shows every event and its listeners, and it belongs in code review whenever a listener is added. Name events in the past tense after business facts — OrderPlaced, InvoiceFinalised — rather than after the action you want to trigger, such as SendEmail. An event that exists to make one listener run is a disguised method call.",
+      },
+      {
+        type: "quote",
+        text: "An event announces that something happened. The moment it is used to make something happen, it has become a function call with the name filed off.",
+      },
+      {
+        type: "p",
+        text: "Test both halves separately. Feature tests for the use case should assert that the event was dispatched with Event::fake, not that the email went out. Listener tests should construct the event directly and assert the side effect. That keeps each test focused and stops one slow listener from making every order test slow.",
+      },
+      {
+        type: "p",
+        text: "The practical rule: keep essential steps as direct calls inside the service and its transaction, push genuine side effects to queued, after-commit, idempotent listeners, and make the event map something reviewers actually look at. Decoupling is worth having only when you can still answer the question 'what happens when an order is placed?' in under a minute.",
+      },
+    ],
+  },
+  {
+    slug: "prompt-versioning-and-management-in-production",
+    title: "Prompt Versioning and Management in Production",
+    description:
+      "Prompts change more often than code and break in quieter ways. How to version them, tie every response to the prompt that produced it, roll out changes safely, and keep non-engineers editing without bypassing review.",
+    date: "2026-11-03",
+    readingTime: "8 min read",
+    category: "Artificial Intelligence",
+    tags: ["LLM", "Prompt Engineering", "Versioning", "MLOps", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "In the first version of most LLM features, the prompt is a string literal in a service class. Then a product manager wants to tweak the tone, a support lead wants to add a rule about refunds, and someone moves the prompt to a database table so it can be edited without a deploy. A month later, a customer complains about an answer and nobody can say which version of the prompt produced it, because the row has been edited six times since.",
+      },
+      {
+        type: "p",
+        text: "Prompts are behaviour. They deserve the same discipline as code — versioning, review, staged rollout, rollback — while still being editable by the people who understand the domain best. Those goals are compatible if the system is designed for them from the start.",
+      },
+      { type: "h2", text: "Immutable versions, movable labels" },
+      {
+        type: "p",
+        text: "The model that works is the one container registries use: versions are immutable and content-addressed, and labels such as production and staging are pointers that move. A prompt version includes the template, the variables it expects, the model identifier, the sampling parameters and any tool schemas, because all of them change behaviour. Editing a prompt creates a new version; promoting it moves a label. Rolling back is moving the label back, which takes seconds and needs no deploy.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "import hashlib, json\nfrom dataclasses import dataclass, asdict\n\n@dataclass(frozen=True)\nclass PromptVersion:\n    name: str\n    template: str\n    model: str\n    temperature: float\n    tools: tuple[str, ...] = ()\n\n    @property\n    def digest(self) -> str:\n        payload = json.dumps(asdict(self), sort_keys=True).encode()\n        return hashlib.sha256(payload).hexdigest()[:12]\n\nclass PromptRegistry:\n    def __init__(self, store):\n        self.store = store  # versions table + labels table\n\n    def resolve(self, name: str, label: str = 'production') -> PromptVersion:\n        digest = self.store.label_target(name, label)\n        return self.store.get_version(name, digest)\n\n    def promote(self, name: str, digest: str, label: str, actor: str) -> None:\n        # Moving a label is the deploy; record who did it and when.\n        self.store.move_label(name, label, digest, actor=actor)",
+      },
+      {
+        type: "p",
+        text: "Every response the feature produces should be logged with the prompt name and digest. That single field turns 'the bot said something odd last Tuesday' from an archaeology project into a lookup.",
+      },
+      { type: "h2", text: "Rolling out a prompt change" },
+      {
+        type: "ul",
+        items: [
+          "Gate promotion on the eval suite. A new version cannot receive the production label until it has run against the regression set and met the baseline.",
+          "Canary by traffic share or by tenant. Route a small percentage of requests to the candidate version and compare task success, latency, token usage and user feedback before full promotion.",
+          "Keep templates and code compatible across versions. If a prompt starts expecting a new variable, the code that fills it must ship first, so either version can run against either deploy.",
+          "Retire versions deliberately. Keep old versions readable for audit even after no label points at them; delete only on a retention schedule.",
+          "Watch token counts. A prompt edit that adds two paragraphs of context is also a cost change, and it should show up in the rollout comparison.",
+        ],
+      },
+      { type: "h2", text: "Letting domain experts edit safely" },
+      {
+        type: "p",
+        text: "The people best placed to improve a prompt are often not engineers. Locking prompts in the codebase means every wording change waits for a developer; letting anyone edit the production row means no review at all. The middle ground is a workflow: experts edit drafts in a small internal tool, the tool runs the eval suite and shows the diff and the worst-scoring cases, and a second person approves promotion. That is a pull request without Git, and it keeps the audit trail intact.",
+      },
+      {
+        type: "p",
+        text: "Whether prompts live in the repository or in a registry service matters less than having one source of truth. The failure mode to avoid is both: a copy in code used as a fallback and a copy in the database used most of the time, drifting apart until an outage reveals which one actually ran.",
+      },
+      {
+        type: "quote",
+        text: "If you cannot name the exact prompt that produced an answer, you cannot debug it, reproduce it, or defend it.",
+      },
+      {
+        type: "p",
+        text: "Start small: content-hash your prompt configuration, log the digest with every response, and make promotion a recorded, reversible action behind an eval gate. Those three habits cover most of what a prompt management platform offers, and they make the eventual move to one a migration rather than a rescue.",
+      },
+    ],
+  },
+  {
+    slug: "ci-pipelines-under-ten-minutes",
+    title: "CI Pipelines That Stay Under Ten Minutes",
+    description:
+      "A slow pipeline taxes every change and quietly trains people to batch work and skip tests. How to measure where CI time goes, cache and parallelise properly, and keep the pipeline fast as the codebase grows.",
+    date: "2026-11-04",
+    readingTime: "8 min read",
+    category: "Developer Productivity",
+    tags: ["CI/CD", "Testing", "Developer Experience", "GitHub Actions", "Build Performance"],
+    content: [
+      {
+        type: "p",
+        text: "Nobody decides to have a 40-minute pipeline. It accretes: a new test suite here, a security scan there, a Docker build that downloads the world every time. Each addition is reasonable. The total is a tax on every change, and teams respond in predictable ways — they batch work into larger pull requests, merge without waiting, and rerun flaky jobs until they pass. All three make the codebase worse.",
+      },
+      {
+        type: "p",
+        text: "Ten minutes is not a magic number, but it is roughly the point at which people stop context-switching away while they wait. Holding a pipeline under it is an engineering problem like any other: measure, remove waste, parallelise what remains, and guard against regression.",
+      },
+      { type: "h2", text: "Measure the critical path first" },
+      {
+        type: "p",
+        text: "Before optimising anything, export job and step timings for the last few hundred runs and look at the critical path — the longest chain of dependent jobs — not the total compute time. A pipeline with twelve parallel jobs is only as fast as its slowest one plus the setup it waits on. Common findings are dependency installation that is not cached, a Docker image rebuilt from scratch, a single test job that runs everything serially, and an end-to-end suite that blocks merges it has nothing to do with.",
+      },
+      { type: "h2", text: "The usual wins, in order of payoff" },
+      {
+        type: "ul",
+        items: [
+          "Cache dependencies keyed on the lockfile hash: Composer, npm, pip. A warm cache turns minutes of downloading into seconds of extraction.",
+          "Use Docker layer caching and order the Dockerfile so dependency installation comes before copying application code. Changing one PHP file should not reinstall every package.",
+          "Split the test suite across parallel runners by historical timing, not by file count. Most test frameworks and CI providers support timing-based sharding.",
+          "Run only what the change can affect. Path filters skip frontend jobs for backend-only changes, and vice versa. Keep the full suite on the main branch so nothing escapes.",
+          "Move slow, low-signal checks off the merge path. Full end-to-end suites and deep scans can run on main or nightly and page the team on failure.",
+        ],
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "name: ci\non: [pull_request]\n\njobs:\n  tests:\n    runs-on: ubuntu-latest\n    strategy:\n      fail-fast: false\n      matrix:\n        shard: [1, 2, 3, 4]\n    steps:\n      - uses: actions/checkout@v4\n      - uses: shivammathur/setup-php@v2\n        with:\n          php-version: '8.3'\n          coverage: none\n      - uses: actions/cache@v4\n        with:\n          path: vendor\n          key: composer-${{ hashFiles('composer.lock') }}\n      - run: composer install --no-interaction --prefer-dist\n      - name: Run shard\n        run: |\n          php vendor/bin/phpunit --list-tests-xml tests.xml\n          php scripts/shard.php tests.xml ${{ matrix.shard }} 4 > shard.txt\n          php vendor/bin/phpunit $(cat shard.txt)",
+      },
+      {
+        type: "p",
+        text: "The shard script here is a placeholder for whatever splitting strategy your stack supports; the point is the shape. Four runners each doing a quarter of the work, with a dependency cache keyed on the lockfile and coverage disabled on the merge path because instrumenting every line is slow and rarely needed per pull request.",
+      },
+      { type: "h2", text: "Flaky tests are a speed problem" },
+      {
+        type: "p",
+        text: "A flaky test costs a full pipeline rerun every time it fails, and it erodes trust until people stop reading failures at all. Track flakiness explicitly: record every test that failed and then passed on retry for the same commit. Quarantine tests above a threshold into a non-blocking job with an owner and a deadline, and fix the common causes — shared database state, real clocks, real network calls, order-dependent fixtures. Automatic retries hide the problem; use them only as a temporary measure while the fix is in progress.",
+      },
+      {
+        type: "quote",
+        text: "Every minute of CI is paid by every engineer on every change, forever. It is the most leveraged performance budget you own.",
+      },
+      {
+        type: "p",
+        text: "Finally, make the budget visible. Chart median and 90th-percentile pipeline duration weekly, and treat a step change the way you treat a production latency regression: find the commit that caused it. Pipelines get slow one reasonable addition at a time, and they stay fast only when someone is watching the number and has permission to push back.",
+      },
+    ],
+  },
+  {
+    slug: "customer-api-keys-scopes-rotation-leak-response",
+    title: "Customer API Keys: Scopes, Rotation, and Leak Response",
+    description:
+      "API keys are passwords that customers paste into CI configs, scripts and public repositories. How to issue keys that are scoped, hashed, identifiable when leaked, rotatable without downtime, and revocable in minutes.",
+    date: "2026-11-05",
+    readingTime: "9 min read",
+    category: "Security",
+    tags: ["API Security", "Authentication", "Secrets Management", "SaaS", "Incident Response"],
+    content: [
+      {
+        type: "p",
+        text: "Every SaaS product with an API eventually issues keys to customers, and every one of those keys eventually ends up somewhere it should not: a public repository, a support ticket, a screenshot in a forum post, a log line in a third-party tool. You cannot prevent customers from mishandling keys. You can design the key system so that a leak is small in blast radius, easy to detect and fast to contain.",
+      },
+      {
+        type: "p",
+        text: "Most first implementations get the basics wrong in the same ways: keys stored in plain text, a single all-powerful key per account, no way to rotate without breaking integrations, and no idea which key made which request. Each of those is cheap to fix early and painful to fix after customers depend on the old behaviour.",
+      },
+      { type: "h2", text: "Design the key format" },
+      {
+        type: "p",
+        text: "A good key is recognisable, verifiable and useless to store. Give it a fixed prefix that identifies your product and environment, for example acme_live_ and acme_test_, so secret scanners and your own support staff can recognise it. Include a short public identifier so you can look the key up without scanning, and a long random secret. Store only a hash of the secret. Because keys are high-entropy random values rather than human passwords, a fast keyed hash such as HMAC-SHA256 is appropriate; slow password hashing would only add latency to every API call.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "final class ApiKeyIssuer\n{\n    public function issue(Tenant $tenant, array $scopes, ?CarbonImmutable $expiresAt): IssuedKey\n    {\n        $publicId = Str::lower(Str::random(12));\n        $secret   = bin2hex(random_bytes(32));\n        $env      = app()->isProduction() ? 'live' : 'test';\n\n        $key = ApiKey::create([\n            'tenant_id'   => $tenant->id,\n            'public_id'   => $publicId,\n            'secret_hash' => hash_hmac('sha256', $secret, config('auth.api_key_pepper')),\n            'scopes'      => $scopes,\n            'expires_at'  => $expiresAt,\n        ]);\n\n        // The plaintext is returned once and never stored or logged.\n        return new IssuedKey($key, \"acme_{$env}_{$publicId}_{$secret}\");\n    }\n\n    public function verify(string $publicId, string $secret): ?ApiKey\n    {\n        $key = ApiKey::where('public_id', $publicId)->whereNull('revoked_at')->first();\n        $hash = hash_hmac('sha256', $secret, config('auth.api_key_pepper'));\n\n        return $key && hash_equals($key->secret_hash, $hash) && ! $key->isExpired() ? $key : null;\n    }\n}",
+      },
+      {
+        type: "p",
+        text: "The comparison uses hash_equals to avoid timing differences, and the pepper lives in configuration rather than the database, so a database dump alone is not enough to verify guesses. Show the full key exactly once at creation; afterwards, display only the prefix and the last few characters.",
+      },
+      { type: "h2", text: "Scopes and limits" },
+      {
+        type: "ul",
+        items: [
+          "Default to least privilege. A new key should be read-only unless the customer chooses otherwise, and scopes should map to resources and actions, not to internal endpoints.",
+          "Allow multiple keys per account, each with a name, so a leaked CI key can be revoked without breaking the production integration.",
+          "Support optional expiry and IP allow-lists for customers who want them; enterprise security teams will ask.",
+          "Record last-used time and source IP per key. Unused keys are candidates for automatic expiry, and an unexpected IP is an early leak signal.",
+          "Rate-limit per key as well as per account, so one compromised key cannot exhaust a customer's whole quota.",
+        ],
+      },
+      { type: "h2", text: "Rotation without downtime" },
+      {
+        type: "p",
+        text: "If rotating a key means an outage, customers will not rotate. Support overlap: the customer creates a new key, deploys it, confirms traffic has moved using the last-used timestamps, and then revokes the old one. For forced rotations, allow a short grace period where the old key still works but every response carries a deprecation header and the account owner is emailed. Never rotate silently on the customer's behalf.",
+      },
+      { type: "h2", text: "When a key leaks" },
+      {
+        type: "p",
+        text: "Join the secret scanning programmes run by code hosting platforms where you can; the distinctive prefix is what makes your keys detectable. When a leak is reported, the playbook should be automated: revoke or suspend the key, notify the account owner with where it was found, and preserve the request log for that key so the customer can see what, if anything, was done with it. Measure the time from report to revocation, and aim for minutes rather than hours.",
+      },
+      {
+        type: "quote",
+        text: "Assume every key you issue will leak eventually. The design question is only how much damage it can do before you notice.",
+      },
+      {
+        type: "p",
+        text: "The takeaway: prefixed keys with a public identifier, hashed secrets, narrow scopes, multiple named keys per account, overlap-based rotation and an automated leak response. None of it is novel, and all of it is far easier to build before your first enterprise security questionnaire than after.",
+      },
+    ],
+  },
+  {
+    slug: "load-testing-that-predicts-production",
+    title: "Load Testing That Predicts Production",
+    description:
+      "Most load tests prove that an empty database can serve one endpoint quickly. How to model real traffic, use realistic data, measure the right percentiles and turn results into capacity decisions you can trust.",
+    date: "2026-11-06",
+    readingTime: "8 min read",
+    category: "Engineering",
+    tags: ["Performance", "Load Testing", "Capacity Planning", "k6", "Reliability"],
+    content: [
+      {
+        type: "p",
+        text: "A load test that passes and is followed by a production incident is worse than no load test, because it gave everyone false confidence. It happens constantly. The test hammered one endpoint with identical requests against a staging database with a few thousand rows, caches were warm from the first second, and the result was a reassuring graph that bore no resemblance to a Monday morning.",
+      },
+      {
+        type: "p",
+        text: "A load test is a model of production. Like any model, it is only as useful as its assumptions. The work is not running the tool; it is getting the traffic shape, the data and the environment close enough to reality that the result predicts something.",
+      },
+      { type: "h2", text: "Model the traffic, not the endpoint" },
+      {
+        type: "p",
+        text: "Start from production access logs or tracing data. Derive the mix of requests — which endpoints, in what proportion, with what think time between steps — and turn the most common user journeys into scenarios. Use an open model, where new requests arrive at a target rate regardless of how fast the system responds, rather than a closed model of a fixed number of virtual users. Closed models hide overload: when the system slows down, virtual users wait and the arrival rate politely drops, which real users never do.",
+      },
+      {
+        type: "code",
+        lang: "typescript",
+        code: "import http from 'k6/http';\nimport { check, sleep } from 'k6';\n\nexport const options = {\n  scenarios: {\n    browse: {\n      executor: 'ramping-arrival-rate',\n      startRate: 20,\n      timeUnit: '1s',\n      preAllocatedVUs: 200,\n      stages: [\n        { target: 100, duration: '5m' },\n        { target: 100, duration: '15m' },\n        { target: 250, duration: '5m' },\n      ],\n    },\n  },\n  thresholds: {\n    http_req_failed: ['rate<0.01'],\n    'http_req_duration{journey:search}': ['p(95)<400', 'p(99)<1200'],\n  },\n};\n\nconst terms = JSON.parse(open('./search-terms.json'));\n\nexport default function () {\n  const q = terms[Math.floor(Math.random() * terms.length)];\n  const res = http.get(`${__ENV.BASE_URL}/api/search?q=${encodeURIComponent(q)}`, {\n    tags: { journey: 'search' },\n  });\n  check(res, { 'status is 200': (r) => r.status === 200 });\n  sleep(Math.random() * 2);\n}",
+      },
+      {
+        type: "p",
+        text: "The search terms come from a sampled, anonymised production list, so cache hit rates and query costs resemble reality. Repeating one query a million times measures your cache, not your system.",
+      },
+      { type: "h2", text: "What makes results trustworthy" },
+      {
+        type: "ul",
+        items: [
+          "Production-sized data. Query plans change with table size; an index that is irrelevant at ten thousand rows is critical at fifty million. Use a masked copy or generated data with realistic cardinality and skew.",
+          "Production-shaped infrastructure. Same instance types, same connection pool sizes, same autoscaling rules. Testing on a smaller environment and multiplying the result is guesswork, because bottlenecks do not scale linearly.",
+          "Long enough runs. Memory leaks, connection exhaustion, queue backlog and garbage collection pauses show up after tens of minutes, not in a two-minute burst.",
+          "Tail latency, not averages. Report p95 and p99 per journey, plus error rate. The average hides exactly the requests users complain about.",
+          "A generator that is not the bottleneck. Watch CPU and network on the load generators; a saturated generator produces a flat line that looks like your system's limit.",
+        ],
+      },
+      { type: "h2", text: "Turn the result into a decision" },
+      {
+        type: "p",
+        text: "The output of a load test should be a sentence, not a dashboard: 'at 250 requests per second the search journey stays under 400 milliseconds at p95; beyond that, the database connection pool saturates first'. That tells you the current headroom, the first bottleneck and what to fix next. Ramp past the expected peak until something breaks, because knowing how the system fails — gracefully shedding load or collapsing — matters as much as knowing where.",
+      },
+      {
+        type: "quote",
+        text: "A load test that never found the breaking point has only told you that it did not look hard enough.",
+      },
+      {
+        type: "p",
+        text: "Make it routine. Keep scenarios in the repository, run a short version against staging on every release and a full one before known peaks, and compare against the previous run. Capacity regressions are much easier to fix in the pull request that introduced them than during the sale they were going to ruin.",
+      },
+    ],
+  },
+  {
+    slug: "kubernetes-requests-and-limits-oomkills-throttling",
+    title: "Kubernetes Requests and Limits: Ending OOMKills and Throttling",
+    description:
+      "Requests and limits decide where pods run, when they are killed and how fast they go. What each setting actually does, why CPU limits cause mysterious latency, and how to size workloads from real usage.",
+    date: "2026-11-07",
+    readingTime: "9 min read",
+    category: "Cloud",
+    tags: ["Kubernetes", "Resource Management", "Performance", "Reliability", "Cloud"],
+    content: [
+      {
+        type: "p",
+        text: "Two symptoms bring most teams to the topic of Kubernetes resources. Pods restart with OOMKilled in their status and nobody knows why memory grew, or latency spikes under moderate load even though the node dashboards show plenty of idle CPU. Both usually trace back to requests and limits copied from a template years ago and never revisited.",
+      },
+      {
+        type: "p",
+        text: "These settings are not paperwork. Requests drive scheduling and bin-packing, limits drive enforcement, and the combination decides a pod's quality-of-service class, which in turn decides who gets evicted first when a node runs short. Getting them right is one of the cheapest reliability improvements available on a cluster.",
+      },
+      { type: "h2", text: "What the settings actually do" },
+      {
+        type: "ul",
+        items: [
+          "CPU request: the scheduler guarantees this much CPU is available on the node, and under contention the container gets a share of CPU proportional to its request.",
+          "CPU limit: enforced by the kernel's CFS quota. Once a container uses its quota within a scheduling period, it is throttled until the next period, even if the node is otherwise idle.",
+          "Memory request: used for scheduling and eviction ranking. It reserves nothing at runtime; a container can use more if the node has it.",
+          "Memory limit: a hard ceiling. Exceeding it causes the kernel to kill the process — the OOMKill — rather than slowing it down. Memory is not compressible the way CPU is.",
+          "QoS class: pods where every container has requests equal to limits are Guaranteed; pods with some requests are Burstable; pods with none are BestEffort and are evicted first under node pressure.",
+        ],
+      },
+      { type: "h2", text: "Why CPU limits cause latency" },
+      {
+        type: "p",
+        text: "CPU throttling is the source of a great deal of unexplained tail latency. A web process with a limit of one CPU that receives a burst of requests can burn its quota in the first part of the scheduling period and then sit throttled for the rest, adding tens of milliseconds to every request in flight. Average CPU utilisation looks modest, because the average smooths over the bursts. The container_cpu_cfs_throttled_periods_total metric tells the real story.",
+      },
+      {
+        type: "p",
+        text: "Many teams therefore set accurate CPU requests and omit CPU limits for latency-sensitive services, relying on requests to guarantee fair shares under contention. That is a reasonable default where tenants on the cluster are trusted. Where they are not, or where cost allocation depends on hard caps, keep limits but size them generously and watch throttling. Memory is different: always set a memory limit, and for most services set it equal to the request so the pod's behaviour does not depend on what its neighbours are doing.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: api\nspec:\n  replicas: 4\n  selector:\n    matchLabels: { app: api }\n  template:\n    metadata:\n      labels: { app: api }\n    spec:\n      containers:\n        - name: php-fpm\n          image: registry.example.com/api:1.42.0\n          resources:\n            requests:\n              cpu: 500m        # sized from p95 usage, not a guess\n              memory: 512Mi\n            limits:\n              memory: 512Mi    # equal to request: predictable, no noisy neighbours\n              # no CPU limit: avoids CFS throttling on bursty requests\n          env:\n            - name: PHP_FPM_PM_MAX_CHILDREN\n              value: \"8\"       # must fit inside the memory limit",
+      },
+      {
+        type: "p",
+        text: "That last environment variable matters more than it looks. A PHP-FPM pool, a Gunicorn worker count or a JVM heap is a memory decision made inside the container. If eight workers can each grow to 80 megabytes, a 512 megabyte limit is an OOMKill waiting for a heavy request. Size the runtime to fit the limit, not the other way round.",
+      },
+      { type: "h2", text: "Sizing from evidence" },
+      {
+        type: "p",
+        text: "Collect at least a week of per-container usage that includes your peak periods. Set CPU requests near the 90th or 95th percentile of usage and memory requests and limits above the observed maximum with headroom for growth. The Vertical Pod Autoscaler in recommendation mode is a useful second opinion even if you never let it apply changes automatically. Revisit sizing after significant releases, because a new feature can change a service's memory profile overnight.",
+      },
+      {
+        type: "quote",
+        text: "Requests are a promise to the scheduler. Limits are a threat from the kernel. Make sure you mean both.",
+      },
+      {
+        type: "p",
+        text: "The practical checklist: every container has requests; memory limits are set and usually equal to requests; CPU limits are either removed for latency-sensitive services or sized with throttling metrics in view; and in-process worker counts are derived from the memory limit. Do that, and most OOMKills and mystery latency spikes stop being mysteries.",
+      },
+    ],
+  },
+  {
+    slug: "time-zones-dst-recurring-schedules",
+    title: "Time Zones, DST, and Recurring Schedules",
+    description:
+      "Recurring events break twice a year and in every country that changes its rules. How to store instants and schedules correctly, expand recurrences across daylight saving transitions, and test the edge cases before customers do.",
+    date: "2026-11-08",
+    readingTime: "8 min read",
+    category: "Engineering",
+    tags: ["Time Zones", "Scheduling", "Data Modelling", "Testing", "Backend"],
+    content: [
+      {
+        type: "p",
+        text: "Every scheduling feature works perfectly from the day it ships until the first daylight saving transition. Then a weekly report arrives an hour late, a reminder fires twice, a booking at 02:30 on a spring-forward night points to a time that never existed, and a customer in another hemisphere notices that their meetings shifted the week before everyone else's did.",
+      },
+      {
+        type: "p",
+        text: "These are not exotic bugs. They follow directly from one modelling mistake: treating a recurring local time as if it were a fixed instant. Once you separate the two concepts in the schema and in code, most of the problems disappear and the remaining ones become explicit decisions.",
+      },
+      { type: "h2", text: "Instants and wall-clock times are different things" },
+      {
+        type: "p",
+        text: "An instant is a point on the global timeline: when a payment was captured, when a log line was written. Store it in UTC and convert only for display. A wall-clock schedule is a human intention: 'every Monday at 09:00 in London'. Store that as a local time plus an IANA zone identifier such as Europe/London, never as a UTC offset. An offset like +01:00 is only true for part of the year; the zone identifier carries the rules, including future changes to them.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Past events: store the UTC instant. Optionally also store the zone it occurred in if the display needs local context.",
+          "Future one-off events in a user's local time: store local date-time plus zone, and compute the instant when needed. Governments change DST rules with little notice, and a precomputed UTC value would silently become wrong.",
+          "Recurring schedules: store the rule, the local time and the zone. Expand occurrences on demand, a bounded window at a time.",
+          "Server and database time zones: set them to UTC and never rely on them for business logic.",
+          "Keep the system's time zone database up to date; it ships with the operating system, the language runtime or both.",
+        ],
+      },
+      { type: "h2", text: "Expanding recurrences across transitions" },
+      {
+        type: "p",
+        text: "Two transitions cause trouble. In the spring, local clocks skip an hour, so a time such as 02:30 does not exist that day. In the autumn, an hour repeats, so 01:30 happens twice. You need a policy for both, and the common sensible one is: shift a non-existent time forward by the length of the gap, and choose the first occurrence of an ambiguous one. Whatever you choose, make it deliberate and test it.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "from datetime import date, datetime, time, timedelta, timezone\nfrom zoneinfo import ZoneInfo\n\ndef occurrence(day: date, at: time, zone: str) -> tuple[datetime, bool]:\n    \"\"\"Resolve a wall-clock time to a UTC instant with an explicit DST policy.\"\"\"\n    tz = ZoneInfo(zone)\n    # fold=0 picks the first of an ambiguous pair. For a time inside a spring-forward\n    # gap it applies the pre-transition offset, which shifts it forward by the gap:\n    # 02:30 in Europe/Berlin on that night resolves to 03:30 local.\n    local = datetime.combine(day, at, tzinfo=tz)\n    utc = local.astimezone(timezone.utc)\n    shifted = utc.astimezone(tz).time() != at  # surface it; do not hide it\n    return utc, shifted\n\ndef weekly(start: date, at: time, zone: str, count: int) -> list[datetime]:\n    return [occurrence(start + timedelta(weeks=i), at, zone)[0] for i in range(count)]\n\n# 09:00 London stays 09:00 local; the UTC instant moves by an hour at the transition.\nfor ts in weekly(date(2026, 10, 19), time(9, 0), 'Europe/London', 3):\n    print(ts.isoformat())",
+      },
+      {
+        type: "p",
+        text: "The output shows exactly what users expect and naive code gets wrong: the meeting stays at nine o'clock local time, and its UTC instant moves by an hour across the October transition. Code that stored 08:00 UTC and added seven days would have moved the meeting to eight o'clock local instead.",
+      },
+      { type: "h2", text: "Scheduling jobs, not just events" },
+      {
+        type: "p",
+        text: "The same rules apply to background jobs. A cron entry evaluated in a server zone that observes DST will skip or double-run jobs scheduled inside the transition hour. Run schedulers in UTC and, where a job must run at a customer's local time, store the customer's zone and compute the next run per customer. Make the job idempotent per logical period — a report for a given local date — so that a double fire produces one report, not two.",
+      },
+      {
+        type: "quote",
+        text: "An offset is a fact about one moment. A time zone is a set of rules about all of them. Recurring schedules need the rules.",
+      },
+      {
+        type: "p",
+        text: "Write tests that pin the clock to the days around transitions in at least two zones from different hemispheres, plus one zone with a non-hour offset. Most time bugs are cheap to catch in a test and expensive to explain in an apology email, and they come back twice a year if nobody writes the test.",
+      },
+    ],
+  },
+  {
+    slug: "small-models-on-the-edge-local-inference",
+    title: "Small Models on the Edge: When Local Inference Wins",
+    description:
+      "Not every AI feature needs a frontier model behind an API. When small models running on devices or edge servers beat the cloud on latency, privacy, cost and availability, and the engineering trade-offs that come with them.",
+    date: "2026-11-09",
+    readingTime: "8 min read",
+    category: "Artificial Intelligence",
+    tags: ["LLM", "Edge AI", "On-Device Inference", "Quantisation", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "The default architecture for an AI feature is a call to a hosted frontier model. It is the right default: the models are capable, the integration is a few lines and someone else runs the GPUs. But it is a default, not a law, and there is a growing class of features where sending every request across the internet to the largest available model is slow, expensive and harder to justify to a privacy-conscious customer than it needs to be.",
+      },
+      {
+        type: "p",
+        text: "Small models — a few billion parameters or fewer, often quantised — now run acceptably on laptops, phones, browsers and modest edge servers. They are not general replacements for frontier models. They are very good at narrow, well-defined tasks, and narrow, well-defined tasks are most of what production features actually do.",
+      },
+      { type: "h2", text: "Where local inference wins" },
+      {
+        type: "ul",
+        items: [
+          "Latency-critical interactions: autocomplete, inline suggestions, voice command parsing. A round trip to a remote API adds network time that a local model avoids entirely.",
+          "Data that should not leave the device or the site: medical notes, legal documents, factory telemetry. Local inference turns a data processing agreement discussion into a non-event.",
+          "High-volume, low-complexity tasks: classification, routing, entity extraction, redaction. Paying per token for millions of simple calls is often the most expensive way to do them.",
+          "Intermittent connectivity: field devices, retail stores, vehicles. A feature that works offline is a different product from one that fails without signal.",
+          "Pre-processing for a larger model: a local model that filters, summarises or redacts before anything is sent to the cloud reduces both cost and exposure.",
+        ],
+      },
+      { type: "h2", text: "The trade-offs you take on" },
+      {
+        type: "p",
+        text: "Running models locally moves operational work to you. You now own model distribution and updates, compatibility across hardware, memory pressure on devices you do not control, and evaluation of a model that behaves differently after quantisation. A four-bit quantised model is much smaller and faster than its full-precision original, and on some tasks measurably worse. You need your own eval set for the specific task, run against the exact quantised artefact you ship.",
+      },
+      {
+        type: "p",
+        text: "Capability is the other limit. Small models handle extraction, classification and short structured generation well. They are weaker at long multi-step reasoning, broad world knowledge and following complex instructions. The architecture that works in practice is a cascade: the local model handles the common case and escalates to a hosted model when its confidence is low or the task is out of scope.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "from dataclasses import dataclass\n\n@dataclass\nclass Result:\n    label: str\n    confidence: float\n    source: str\n\nclass CascadeClassifier:\n    def __init__(self, local_model, remote_client, threshold: float = 0.85):\n        self.local = local_model        # quantised model loaded once per process\n        self.remote = remote_client     # hosted model, bounded timeout\n        self.threshold = threshold\n\n    def classify(self, text: str, allow_remote: bool) -> Result:\n        label, confidence = self.local.predict(text)\n        if confidence >= self.threshold or not allow_remote:\n            return Result(label, confidence, source='local')\n\n        try:\n            label = self.remote.classify(text, timeout=5.0)\n            return Result(label, 1.0, source='remote')\n        except TimeoutError:\n            # Degrade to the local answer rather than failing the request.\n            return Result(label, confidence, source='local-fallback')",
+      },
+      {
+        type: "p",
+        text: "The allow_remote flag is where privacy policy lives: for tenants or data classes that must not leave the device, escalation is simply switched off. Log the source of every result, because the escalation rate is the number that tells you whether the local model is doing its job and what it would cost to remove it.",
+      },
+      { type: "h2", text: "Deciding with numbers" },
+      {
+        type: "p",
+        text: "Make the decision on measured trade-offs, not enthusiasm. For the specific task, compare quality on your eval set, p95 latency on target hardware, cost per thousand requests including the hosting or device impact, and the operational burden of shipping model updates. If the small model is within an acceptable margin on quality and clearly ahead on latency, privacy or cost, it wins. If it needs constant escalation to be good enough, it is adding complexity without benefit.",
+      },
+      {
+        type: "quote",
+        text: "The best model for a feature is the smallest one that passes its evals. Everything above that is paid for in latency, money and data exposure.",
+      },
+      {
+        type: "p",
+        text: "Start with one narrow task that runs at high volume or handles sensitive data, build the eval set first, and try a small model behind a cascade with a hosted fallback. You will learn quickly whether local inference fits your product, and you keep a safe path back if it does not.",
+      },
+    ],
+  },
+  {
+    slug: "anti-corruption-layers-legacy-integration",
+    title: "Anti-Corruption Layers: Integrating With Legacy Systems Cleanly",
+    description:
+      "Legacy systems leak their data model into everything that touches them. How an anti-corruption layer translates between their world and yours, contains their quirks, and makes the eventual replacement a contained change.",
+    date: "2026-11-10",
+    readingTime: "8 min read",
+    category: "Architecture",
+    tags: ["Domain-Driven Design", "Legacy Systems", "Integration", "Architecture", "Migration"],
+    content: [
+      {
+        type: "p",
+        text: "Integrating with a legacy system usually starts with a quick client class. It calls the old ERP, returns its arrays more or less as they arrive, and the rest of the application starts using fields called CUST_STAT_CD and FLG_2 with comments explaining that 'A' means active except for wholesale customers. Two years later those codes appear in controllers, reports, queue messages and the mobile API, and replacing the ERP has become a rewrite of everything.",
+      },
+      {
+        type: "p",
+        text: "An anti-corruption layer, a pattern from domain-driven design, is the discipline of stopping that leak. It is a boundary that translates between the legacy system's model and your own, so the rest of your code speaks your language and only one well-tested component knows what FLG_2 means.",
+      },
+      { type: "h2", text: "What the layer is responsible for" },
+      {
+        type: "ul",
+        items: [
+          "Translation of concepts: mapping legacy codes, flags and denormalised records into your domain types with meaningful names and explicit states.",
+          "Protocol adaptation: SOAP, fixed-width files, stored procedures, screen scraping — whatever the legacy system speaks stays inside the layer.",
+          "Validation and repair: legacy data is often inconsistent. The layer decides what is a recoverable quirk and what is an error, and rejects garbage instead of passing it on.",
+          "Resilience: bounded timeouts, limited retries for safe reads, circuit breaking, and caching where the legacy system is slow or fragile.",
+          "Observability: logging and metrics on translation failures, so data quality problems in the old system become visible rather than silently corrupting the new one.",
+        ],
+      },
+      { type: "h2", text: "Translate at the edge, once" },
+      {
+        type: "p",
+        text: "The core of the layer is a translator with an interface defined in your terms. The application depends on that interface; the legacy implementation sits behind it. Because the interface describes your domain rather than the vendor's, a future implementation backed by a new system can satisfy it without changing any calling code.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "interface CustomerDirectory\n{\n    public function find(CustomerId $id): ?Customer;\n}\n\nfinal class LegacyErpCustomerDirectory implements CustomerDirectory\n{\n    public function __construct(private ErpSoapClient $erp) {}\n\n    public function find(CustomerId $id): ?Customer\n    {\n        $row = $this->erp->call('GET_CUST', ['CUST_NO' => $id->value], timeoutSeconds: 3);\n        if ($row === null) {\n            return null;\n        }\n\n        return new Customer(\n            id: $id,\n            name: trim($row['CUST_NM']),\n            status: $this->status($row['CUST_STAT_CD'], $row['FLG_2']),\n            creditLimit: Money::ofMinor((int) round((float) $row['CR_LMT'] * 100), 'GBP'),\n        );\n    }\n\n    private function status(string $code, string $wholesaleFlag): CustomerStatus\n    {\n        return match (true) {\n            $code === 'A' && $wholesaleFlag !== 'W' => CustomerStatus::Active,\n            $code === 'A' && $wholesaleFlag === 'W' => CustomerStatus::PendingApproval,\n            $code === 'S'                          => CustomerStatus::Suspended,\n            default => throw new UnmappableLegacyValue('CUST_STAT_CD', $code),\n        };\n    }\n}",
+      },
+      {
+        type: "p",
+        text: "The awkward rule about wholesale customers lives in exactly one place and is covered by unit tests built from real legacy records. Unknown codes raise an explicit exception instead of becoming a default status, because a silent default is how bad data spreads. The currency conversion is equally explicit; the legacy system stored decimal pounds, and the domain stores minor units.",
+      },
+      { type: "h2", text: "Writes and events need the same care" },
+      {
+        type: "p",
+        text: "Reads are the easy half. When your system must write back to the legacy one, the layer also translates commands, and it must handle the legacy system's lack of idempotency. Record an outbound operation before sending it, include a reference the legacy side can store, and check for that reference before retrying. If the legacy system emits change files or database triggers, translate those into your own domain events inside the layer, so subscribers never see a raw legacy record.",
+      },
+      {
+        type: "quote",
+        text: "Every legacy field name that escapes the boundary is a line of code you will rewrite during the migration. Pay the translation cost once, at the edge.",
+      },
+      {
+        type: "p",
+        text: "The layer is not free: it is real code with real maintenance, and for a single read-only lookup it may be more structure than the problem needs. It earns its place when the legacy model is meaningfully different from yours, when several parts of your system depend on it, or when replacement is on the roadmap. In those cases, build the boundary early, keep it thin and well-tested, and the eventual migration becomes swapping one implementation rather than untangling a decade of leaked assumptions.",
+      },
+    ],
+  },
+  {
+    slug: "profiling-laravel-in-production-slow-five-percent",
+    title: "Profiling Laravel in Production: Finding the Slow 5%",
+    description:
+      "Averages say the application is fast; the slowest requests say otherwise. How to find and explain tail latency in a Laravel application with tracing, sampled profiling and query analysis, without slowing production down.",
+    date: "2026-11-11",
+    readingTime: "9 min read",
+    category: "Laravel",
+    tags: ["Laravel", "Performance", "Profiling", "Observability", "PHP"],
+    content: [
+      {
+        type: "p",
+        text: "A Laravel application with a median response time of 80 milliseconds can still feel slow, because users do not experience the median. They experience the requests that take two seconds: the dashboard for the customer with ten thousand projects, the export that hits a missing index, the page that makes 400 queries for one tenant and twelve for everyone else. Those requests are a small fraction of traffic and a large fraction of complaints.",
+      },
+      {
+        type: "p",
+        text: "Local profiling rarely finds them, because the local database has the wrong data shape and the developer's account has the wrong amount of it. Tail latency is a production phenomenon, and finding it requires tooling that runs in production at low overhead.",
+      },
+      { type: "h2", text: "Start with percentiles by route" },
+      {
+        type: "p",
+        text: "The first question is where, not why. Break latency down by route and by tenant, and look at p95 and p99 rather than averages. Most APM and tracing tools do this out of the box; if you have nothing, middleware that records route name, tenant, duration and query count into your metrics system is enough to start. The ranking that matters is total time spent in slow requests — frequency multiplied by tail latency — because a rarely used slow route may matter less than a hot route that is occasionally slow.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "final class RecordRequestProfile\n{\n    public function handle(Request $request, Closure $next): Response\n    {\n        $queries = 0;\n        $queryMs = 0.0;\n        DB::listen(function (QueryExecuted $q) use (&$queries, &$queryMs) {\n            $queries++;\n            $queryMs += $q->time;\n        });\n\n        $start = hrtime(true);\n        $response = $next($request);\n        $totalMs = (hrtime(true) - $start) / 1e6;\n\n        if ($totalMs > 1000 || $queries > 100) {\n            Log::channel('slow_requests')->info('slow request', [\n                'route'    => $request->route()?->getName(),\n                'tenant'   => $request->user()?->tenant_id,\n                'total_ms' => round($totalMs),\n                'query_ms' => round($queryMs),\n                'queries'  => $queries,\n            ]);\n        }\n\n        return $response;\n    }\n}",
+      },
+      {
+        type: "p",
+        text: "This logs only identifiers and numbers — no query bindings, no request payloads — so it is safe to leave enabled. The split between total time and query time is the first diagnostic: if queries account for most of the duration, the problem is in the data layer; if they do not, it is in PHP, an external call or the response itself. Laravel also provides DB::whenQueryingForLongerThan for alerting on cumulative query time per request, which suits a similar purpose.",
+      },
+      { type: "h2", text: "The usual culprits" },
+      {
+        type: "ul",
+        items: [
+          "N+1 queries that only explode for large tenants. Model::preventLazyLoading in non-production environments catches many of them early; in production, the query count per request finds the rest.",
+          "Missing or unused indexes on tenant-scoped queries. EXPLAIN on the slow query with the real tenant's parameters often shows a full scan that a composite index starting with tenant_id would fix.",
+          "Synchronous external calls in the request path: payment providers, geocoding, LLM APIs. These need bounded timeouts and, where possible, a move to a queued job.",
+          "Hydrating far more Eloquent models than the response uses. Selecting specific columns, chunking, or using a query builder projection can cut both memory and time sharply.",
+          "Work repeated per request that could be cached or precomputed: permission trees, settings, aggregates for dashboards.",
+        ],
+      },
+      { type: "h2", text: "Sampled profiling for the rest" },
+      {
+        type: "p",
+        text: "When the time is not in queries, you need a code-level profile. Sampling profilers designed for production, such as those built into commercial APM agents or open-source options like Excimer, capture stacks at intervals with low overhead and can be enabled for a fraction of requests or only for a specific route. Combine them with distributed tracing spans around external calls and you can see exactly where a two-second request spent its time. Avoid enabling full instrumenting profilers such as Xdebug in production; their overhead distorts the very timings you are trying to measure.",
+      },
+      {
+        type: "quote",
+        text: "The average tells you the application is healthy. The 99th percentile tells you which customer is about to churn.",
+      },
+      {
+        type: "p",
+        text: "Make tail latency part of normal work: a weekly look at the slowest routes by total slow time, a ticket for the top one, and a check that the fix moved the percentile. Performance does not stay fixed on its own, because tenants grow and features accumulate, but a team that looks at the slow five percent every week rarely gets surprised by it.",
+      },
+    ],
+  },
+  {
+    slug: "gossip-membership-and-failure-detection",
+    title: "Gossip, Membership, and Failure Detection",
+    description:
+      "Every distributed system needs to know which nodes are alive, and no node can know for certain. How gossip protocols spread membership, how SWIM and phi-accrual detectors trade speed for false positives, and how to tune them.",
+    date: "2026-11-12",
+    readingTime: "9 min read",
+    category: "Distributed Systems",
+    tags: ["Distributed Systems", "Gossip Protocols", "Failure Detection", "SWIM", "Clustering"],
+    content: [
+      {
+        type: "p",
+        text: "Any clustered system — a database, a cache, a service mesh, a job scheduler — has to answer a deceptively simple question continuously: which members are alive right now? The answer drives routing, replication and leadership. Get it wrong in one direction and requests go to dead nodes. Get it wrong in the other and healthy nodes are evicted, data is rebalanced for nothing, and the cluster flaps under load exactly when it can least afford to.",
+      },
+      {
+        type: "p",
+        text: "The uncomfortable truth is that a node cannot distinguish a crashed peer from a slow one or from a broken network path. Failure detection is always a guess. The engineering is in making that guess quickly, spreading it efficiently, and avoiding the false positives that turn a slow node into a cluster-wide incident.",
+      },
+      { type: "h2", text: "Why gossip instead of a central registry" },
+      {
+        type: "p",
+        text: "The naive approach is all-to-all heartbeating: every node pings every other node. Message volume grows with the square of cluster size, and it falls over long before clusters get large. A central registry fixes the volume but creates a single point of failure and a bottleneck. Gossip protocols take a different route: each node periodically exchanges state with a few randomly chosen peers, and information spreads epidemically. An update reaches the whole cluster in a number of rounds that grows roughly logarithmically with cluster size, while per-node load stays constant.",
+      },
+      { type: "h2", text: "SWIM: separating detection from dissemination" },
+      {
+        type: "p",
+        text: "The SWIM protocol, which underpins widely used libraries such as HashiCorp's memberlist, splits the problem in two. For detection, each node pings one random member per protocol period. If no acknowledgement arrives, it asks a few other members to ping the target indirectly, which distinguishes 'the target is down' from 'my path to the target is bad'. Only if those indirect probes also fail does the target become suspect. For dissemination, membership changes piggyback on the ping and acknowledgement messages that are being sent anyway, so spreading news costs almost nothing extra.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "import random\n\nSUSPECT_TIMEOUT_ROUNDS = 5\n\ndef protocol_round(self) -> None:\n    target = random.choice(self.members.alive_except(self.id))\n    if self.ping(target, timeout=self.ack_timeout):\n        return\n\n    # Indirect probe: ask k other members to ping the target for us.\n    helpers = random.sample(self.members.alive_except(self.id, target.id), k=3)\n    if any(self.ping_req(h, target, timeout=self.ack_timeout * 2) for h in helpers):\n        return\n\n    # Not declared dead yet: suspect it and let the target refute.\n    self.members.mark_suspect(target.id, incarnation=target.incarnation)\n    self.broadcast(('suspect', target.id, target.incarnation))\n\ndef on_suspect(self, member_id: str, incarnation: int) -> None:\n    if member_id == self.id:\n        # Refute by bumping our incarnation; newer incarnations override suspicion.\n        self.incarnation = max(self.incarnation, incarnation) + 1\n        self.broadcast(('alive', self.id, self.incarnation))\n    else:\n        self.members.start_suspicion_timer(member_id, rounds=SUSPECT_TIMEOUT_ROUNDS)",
+      },
+      {
+        type: "p",
+        text: "The suspicion state is the important refinement. A suspected node that is merely slow receives the rumour about itself and refutes it with a higher incarnation number, and the refutation overrides the suspicion everywhere it spreads. Only if the suspicion timer expires without a refutation is the node declared dead. That single mechanism eliminates a large share of false positives caused by garbage collection pauses and brief network hiccups.",
+      },
+      { type: "h2", text: "Tuning and adaptive detectors" },
+      {
+        type: "ul",
+        items: [
+          "Probe interval and acknowledgement timeout set the detection speed floor. Shorter values detect real failures sooner and raise false positives on busy or long-distance networks.",
+          "Suspicion timeout is the main lever against flapping. Scaling it with the logarithm of cluster size, as memberlist does, keeps it proportionate as the cluster grows.",
+          "Phi-accrual detectors, used in Cassandra and Akka, replace a fixed timeout with a suspicion level computed from the observed distribution of heartbeat intervals, so they adapt to each link's normal jitter.",
+          "Cross-region links need their own settings. Timeouts tuned for a single data centre will declare a healthy remote region dead on every latency spike.",
+          "Membership is not consensus. Gossip gives eventually consistent views; anything that needs a single agreed answer, such as leader election, still needs a consensus protocol.",
+        ],
+      },
+      {
+        type: "quote",
+        text: "A failure detector is a policy for being wrong. Decide in advance which mistake you would rather make: acting late on a dead node or acting early on a slow one.",
+      },
+      {
+        type: "p",
+        text: "In practice, few teams should write their own gossip layer; mature libraries exist for most ecosystems. The value is in understanding them well enough to configure them: know your probe interval, suspicion timeout and indirect probe count, monitor the rate of suspicions and refutations, and treat a rising refutation rate as an early warning that the network or the nodes are struggling, long before it becomes a flapping cluster.",
+      },
+    ],
+  },
+  {
+    slug: "onboarding-enterprise-client-legacy-data",
+    title: "Onboarding an Enterprise Client's Legacy Data",
+    description:
+      "The contract is signed and the data arrives as a database dump, four spreadsheets and a folder of PDFs. How to land legacy data in a new system without corrupting it, losing it, or blocking go-live on perfection.",
+    date: "2026-11-13",
+    readingTime: "9 min read",
+    category: "Engineering",
+    tags: ["Data Migration", "Enterprise", "ETL", "Forward Deployed Engineering", "Data Quality"],
+    content: [
+      {
+        type: "p",
+        text: "Every enterprise deal eventually reaches the same moment. The contract is signed, the kickoff call went well, and then someone sends over the data: a dump from a database nobody has administered since the original vendor left, a handful of spreadsheets that 'fill in the gaps', and a shared drive of scanned documents. Go-live is in six weeks, and the customer assumes the import is the easy part.",
+      },
+      {
+        type: "p",
+        text: "It is rarely the easy part. Legacy data encodes fifteen years of workarounds, half-finished migrations and business rules that only exist in someone's head. Treating onboarding as a one-off script that you run the night before launch is how teams end up with duplicated customers, orphaned invoices and a customer whose first impression of the new system is that it lost their records.",
+      },
+      { type: "h2", text: "Profile before you map" },
+      {
+        type: "p",
+        text: "The first instinct is to open the target schema and start writing a mapping. Resist it. Spend the first days profiling the source: row counts per table, null rates per column, distinct values for anything that looks like a status or type, date ranges, and the obvious integrity questions — how many child rows point at parents that do not exist, how many 'unique' identifiers repeat. That profile becomes the agenda for your first data meeting with the customer, and it turns vague worries into specific questions they can answer.",
+      },
+      {
+        type: "p",
+        text: "Most of the surprises show up here: a status column with forty values where the documentation lists six, dates stored as text in three formats, a 'deleted' flag that some records ignore because a later feature used a separate archive table instead. None of it is exotic. All of it breaks a naive import.",
+      },
+      { type: "h2", text: "Land raw, then transform" },
+      {
+        type: "p",
+        text: "Load the source as-is into a staging schema first, with every column as text if necessary, plus a batch identifier and the source file or table it came from. Do not transform on the way in. Staging gives you a stable, queryable copy you can re-run transformations against as the rules change, and it means a mapping bug costs you a re-run rather than a fresh export request to a customer team that took two weeks to produce the first one.",
+      },
+      {
+        type: "code",
+        lang: "sql",
+        code: "-- Staging keeps the raw value and where it came from.\nCREATE TABLE staging.legacy_customers (\n    batch_id        uuid        NOT NULL,\n    source_file     text        NOT NULL,\n    source_row      integer     NOT NULL,\n    legacy_id       text,\n    name            text,\n    email           text,\n    created_raw     text,\n    status_raw      text,\n    loaded_at       timestamptz NOT NULL DEFAULT now(),\n    PRIMARY KEY (batch_id, source_file, source_row)\n);\n\n-- Rows that fail a rule go to a reject table with a reason, never to /dev/null.\nINSERT INTO staging.rejects (batch_id, source_file, source_row, reason)\nSELECT batch_id, source_file, source_row, 'missing legacy_id'\nFROM staging.legacy_customers\nWHERE legacy_id IS NULL OR btrim(legacy_id) = '';\n\n-- Duplicates are reported, not silently collapsed.\nSELECT legacy_id, count(*) AS copies\nFROM staging.legacy_customers\nGROUP BY legacy_id\nHAVING count(*) > 1\nORDER BY copies DESC;",
+      },
+      { type: "h2", text: "Rules that keep the migration honest" },
+      {
+        type: "ul",
+        items: [
+          "Keep the legacy identifier on every migrated record, in its own indexed column. Support tickets for months afterwards will quote old IDs, and reconciliation is impossible without them.",
+          "Make the import idempotent. Upsert on the legacy identifier plus tenant, so a second run after a fix updates rows instead of duplicating them. You will run it more times than you expect.",
+          "Never drop a row silently. Every record ends up either migrated or in a reject table with a reason the customer can read. A reject report is a conversation; a missing record is an incident.",
+          "Get the customer to own the business decisions. Whether 'inactive' customers from 2011 migrate, or which of two conflicting addresses wins, is their call. Write each decision down with a name and date next to it.",
+          "Reconcile with numbers the customer already trusts: total open balance, active customer count, invoices per year. If those totals match their old reports, confidence follows.",
+        ],
+      },
+      { type: "h2", text: "Rehearse the cutover" },
+      {
+        type: "p",
+        text: "Run the full migration end to end at least twice against fresh exports before the real cutover, timed, with the reconciliation report produced each time. The first rehearsal finds the mapping bugs. The second tells you how long the real window needs to be and whether anything changed in the source since the last export. Agree a freeze point for the legacy system, a rollback plan if reconciliation fails, and who on the customer side signs off on the numbers.",
+      },
+      {
+        type: "p",
+        text: "For large datasets, split the cutover: migrate closed, historical records days ahead, and move only open and recently changed records in the final window. That keeps the freeze short without pretending the history does not matter.",
+      },
+      {
+        type: "quote",
+        text: "A migration is finished when the customer agrees the numbers match, not when the script exits with code zero.",
+      },
+      {
+        type: "p",
+        text: "Treat legacy onboarding as a small product with its own pipeline, tests and reports rather than a script. Profile first, stage raw, make every run repeatable, account for every row, and let the customer sign off against totals they recognise. The data will still be messy. The difference is that the mess is visible, owned and fixed on purpose instead of discovered by their users in the first week.",
+      },
+    ],
+  },
+  {
+    slug: "computer-use-agents-llm-browser-automation",
+    title: "Computer-Use Agents: Where LLM Browser Automation Actually Works",
+    description:
+      "Models that can see a screen and click are impressive in demos and fragile in production. Where computer-use agents earn their keep, where a plain API or Playwright script still wins, and how to fence them in.",
+    date: "2026-11-14",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["AI Agents", "Computer Use", "Browser Automation", "Playwright", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "Computer-use agents — models that receive screenshots, reason about what they see, and issue clicks and keystrokes — make for the best demos in the field. Ask one to book a meeting room or download last month's statements and it moves the cursor around a real interface like a slightly hesitant intern. The natural next thought is that every integration without an API can now be automated.",
+      },
+      {
+        type: "p",
+        text: "In practice the picture is narrower. These agents are slow compared with an API call, more expensive per task than a script, and their failure modes are subtle: they can click the wrong row, mis-read a modal, or confidently report success on a form that never submitted. They are genuinely useful, but only in the right slot and with the right fences around them.",
+      },
+      { type: "h2", text: "Where they actually work" },
+      {
+        type: "ul",
+        items: [
+          "Long-tail portals with no API: supplier sites, government forms, legacy admin panels that a customer uses a few times a month. Writing and maintaining a dedicated scraper for each is not worth it; an agent with a clear goal often is.",
+          "Low-volume, high-variance tasks where the layout changes often enough that brittle selectors keep breaking, and where a human currently does the work by hand.",
+          "Exploratory and QA work: walking through a new build to find broken flows, producing reproduction steps, or checking that a deploy did not regress an obvious path.",
+          "Assisted operations where a human approves the final step. The agent fills the form and stops; a person reviews the screenshot and presses submit.",
+        ],
+      },
+      {
+        type: "p",
+        text: "Notice what is missing: anything high-volume, latency-sensitive or financially irreversible. If a task runs thousands of times a day against a stable interface, a Playwright script or a proper integration will be faster, cheaper and easier to debug. A common pattern is to let the agent discover the flow once, then codify it as a deterministic script and keep the agent as the fallback when the script breaks.",
+      },
+      { type: "h2", text: "Fence the environment" },
+      {
+        type: "p",
+        text: "A computer-use agent is a remote-control session for a model that can be steered by anything it reads on screen. A web page can contain text written specifically to redirect it. So run it in an isolated, disposable browser or VM, with no access to your own systems beyond what the task needs, an allow-list of domains, and credentials scoped to the one account it is meant to use. Never let it browse the open web from a session that holds privileged cookies.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "from urllib.parse import urlparse\n\nALLOWED_HOSTS = {\"portal.supplier.example\", \"auth.supplier.example\"}\nMAX_STEPS = 40\nIRREVERSIBLE = (\"submit payment\", \"delete\", \"confirm order\")\n\ndef run_task(agent, browser, goal: str) -> dict:\n    for step in range(MAX_STEPS):\n        shot = browser.screenshot()\n        action = agent.next_action(goal=goal, screenshot=shot)\n\n        if action.kind == \"navigate\" and urlparse(action.url).hostname not in ALLOWED_HOSTS:\n            return {\"status\": \"blocked\", \"reason\": f\"off-list host {action.url}\"}\n\n        if action.kind == \"done\":\n            # Do not trust the claim: verify against the page itself.\n            ok = browser.page_contains(action.expected_confirmation)\n            return {\"status\": \"done\" if ok else \"unverified\", \"steps\": step}\n\n        if any(word in (action.target_label or \"\").lower() for word in IRREVERSIBLE):\n            return {\"status\": \"needs_approval\", \"screenshot\": shot, \"pending\": action}\n\n        browser.perform(action)\n\n    return {\"status\": \"gave_up\", \"steps\": MAX_STEPS}",
+      },
+      { type: "h2", text: "Verify outcomes, not narration" },
+      {
+        type: "p",
+        text: "The agent's own description of what it did is the least reliable signal you have. Check outcomes independently: did a confirmation number appear, did the downloaded file parse, did the record show up through whatever read path exists. Store the screenshot trail for every run so a failed or disputed task can be reviewed step by step. Without that trail, debugging becomes guesswork about what the model believed it saw.",
+      },
+      {
+        type: "p",
+        text: "Set hard step and time limits, and treat 'gave up' as a perfectly good result that routes to a human queue. An agent that loops for twenty minutes trying to dismiss a cookie banner is costing money and teaching you nothing.",
+      },
+      { type: "h3", text: "Measure like any other integration" },
+      {
+        type: "p",
+        text: "Track success rate per task type, median steps, cost per completed task and the rate of human takeover. Those numbers tell you when a flow is stable enough to codify into a script, and when a portal has changed enough that the agent is quietly failing.",
+      },
+      {
+        type: "quote",
+        text: "Use the agent to find the path. Use code to walk it every day after that.",
+      },
+      {
+        type: "p",
+        text: "Computer-use agents are a real tool for the messy edges of an integration landscape — the portals and back-office screens that will never get an API. Put them in a sandbox, give them a narrow goal and an allow-list, require approval before anything irreversible, and verify results against the page rather than their own report. Used that way, they replace tedious manual work. Used as a general-purpose integration layer, they replace it with something slower and harder to trust.",
+      },
+    ],
+  },
+  {
+    slug: "least-privilege-cloud-iam-scoped-roles",
+    title: "Least Privilege in Cloud IAM: From Admin to Scoped Roles",
+    description:
+      "Most cloud accounts start with one admin key that everything uses. A practical path from broad permissions to scoped, auditable roles without breaking production on the way.",
+    date: "2026-11-15",
+    readingTime: "9 min read",
+    category: "Security",
+    tags: ["IAM", "Least Privilege", "AWS", "Cloud Security", "DevOps"],
+    content: [
+      {
+        type: "p",
+        text: "Almost every cloud account I have been asked to review started the same way: someone created an administrator user to get things running, generated an access key, and that key ended up in the CI pipeline, the application's environment file and at least one developer laptop. Two years later the application, the deploy pipeline and three cron jobs all act as the same all-powerful identity, and nobody is sure what would break if it were taken away.",
+      },
+      {
+        type: "p",
+        text: "That is the real reason least privilege stalls. Everyone agrees with the principle; nobody wants to be the person who removed a permission and took down billing. The way through is to make the transition observable and incremental, not to write the perfect policy on day one.",
+      },
+      { type: "h2", text: "Separate identities before you shrink them" },
+      {
+        type: "p",
+        text: "You cannot scope permissions for a workload that shares an identity with five others. The first step is giving each workload its own role: the web application, each background worker type, the deploy pipeline, the backup job. On AWS that means instance profiles or task roles for compute and OIDC federation for CI instead of stored keys; other clouds have equivalent workload identity features. Initially each new role can keep broad permissions. What you gain immediately is attribution — the audit log now tells you which workload did what.",
+      },
+      { type: "h2", text: "Let the logs write the first draft" },
+      {
+        type: "p",
+        text: "Once identities are separate, run them for a representative period that includes month-end jobs and rare admin paths, then generate a policy from what they actually used. Tools such as IAM Access Analyzer's policy generation read CloudTrail and produce a starting policy; the same can be done by querying the audit log directly. Treat the output as a draft, not a verdict: it misses anything that did not happen in the window, and it often lists resources with wildcards you should tighten by hand.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "# Scoped role for the invoice worker: reads one queue, writes one bucket prefix.\nInvoiceWorkerPolicy:\n  Version: \"2012-10-17\"\n  Statement:\n    - Sid: ConsumeInvoiceQueue\n      Effect: Allow\n      Action:\n        - sqs:ReceiveMessage\n        - sqs:DeleteMessage\n        - sqs:ChangeMessageVisibility\n      Resource: arn:aws:sqs:eu-west-2:111122223333:invoice-jobs\n    - Sid: WriteInvoicePdfs\n      Effect: Allow\n      Action:\n        - s3:PutObject\n      Resource: arn:aws:s3:::acme-documents/invoices/*\n    - Sid: ReadDbCredentials\n      Effect: Allow\n      Action:\n        - secretsmanager:GetSecretValue\n      Resource: arn:aws:secretsmanager:eu-west-2:111122223333:secret:invoice-db-*",
+      },
+      { type: "h2", text: "Rules that hold up" },
+      {
+        type: "ul",
+        items: [
+          "Scope resources, not just actions. 's3:PutObject' on every bucket is barely better than admin; on one prefix it is a real boundary.",
+          "No long-lived keys for workloads. Use roles assumed by compute and OIDC federation for CI. Keys that do not exist cannot leak from a laptop or a log.",
+          "Humans get read-only by default and elevate for a bounded session, through SSO and a role that records who assumed it and why. Standing admin access should be the rare exception.",
+          "Use guardrails above the account — organisation-level policies that deny disabling audit logging or acting outside approved regions — so a mistake in one role cannot remove the safety net.",
+          "Review on change, not annually. A permission added in a pull request is easy to question; one discovered in a yearly audit has three services depending on it.",
+        ],
+      },
+      { type: "h2", text: "Shrink in production without breaking it" },
+      {
+        type: "p",
+        text: "Roll scoped policies out one workload at a time, starting with the least critical. Before you remove the broad policy, alert on access-denied errors for that role so the first missing permission shows up as a page to the team that made the change, not as a mysterious failure discovered by a customer. Keep the previous policy version ready to restore; with infrastructure as code that is a revert, not an archaeology exercise.",
+      },
+      {
+        type: "p",
+        text: "Expect a short tail of rare paths — the quarterly export, the disaster-recovery script — that the usage window missed. Each one you find is a permission you now understand, which is the whole point.",
+      },
+      {
+        type: "quote",
+        text: "Admin access is not a permission set. It is the absence of a decision about what the workload is for.",
+      },
+      {
+        type: "p",
+        text: "Least privilege is a migration, not a policy document. Split identities so you can see who does what, generate drafts from real usage, tighten resources by hand, and remove broad access one workload at a time with denial alerts watching. After a few iterations the blast radius of a leaked credential stops being 'the whole account' and becomes 'one queue and one bucket prefix', which is a very different incident to explain.",
+      },
+    ],
+  },
+  {
+    slug: "disaster-recovery-tested-rpo-rto-restore-drills",
+    title: "Disaster Recovery You've Tested: RPO, RTO, Restore Drills",
+    description:
+      "A backup you have never restored is a hope, not a plan. Defining RPO and RTO with the business, designing backups to meet them, and running restore drills that prove it.",
+    date: "2026-11-16",
+    readingTime: "9 min read",
+    category: "Cloud",
+    tags: ["Disaster Recovery", "Backups", "RPO", "RTO", "Reliability"],
+    content: [
+      {
+        type: "p",
+        text: "Ask most teams whether they have disaster recovery and the answer is yes: the database has automated snapshots, the bucket has versioning, the infrastructure is in code. Ask when they last restored production from those backups into a clean environment and timed it, and the answer gets vaguer. The gap between those two answers is where real outages turn into multi-day incidents.",
+      },
+      {
+        type: "p",
+        text: "Backups fail quietly. Retention gets shortened to save money, an encryption key is rotated without the old one being kept, a new service stores state somewhere nobody added to the backup plan, or the restore process depends on a person who left. None of this is visible until the day you need it, unless you go looking on purpose.",
+      },
+      { type: "h2", text: "Start with RPO and RTO, agreed with the business" },
+      {
+        type: "p",
+        text: "Recovery Point Objective is how much data you can afford to lose, measured in time. Recovery Time Objective is how long you can afford to be down. Both are business decisions with engineering costs, and they should be written down per system, not assumed. A payments ledger might need an RPO of minutes; an analytics warehouse that can be rebuilt from source might tolerate a day.",
+      },
+      {
+        type: "p",
+        text: "Having that conversation explicitly is valuable on its own. It is common to discover that the business assumed near-zero data loss for a system that is backed up nightly, or that engineering was paying for cross-region replication on something nobody would miss for a week.",
+      },
+      { type: "h2", text: "Design backups to meet the numbers" },
+      {
+        type: "ul",
+        items: [
+          "Snapshots alone give you an RPO equal to the snapshot interval. If that is too coarse, enable point-in-time recovery from continuous transaction logs, which is available on most managed databases.",
+          "Copy backups to a separate account and region with restricted delete permissions. Ransomware or a compromised admin credential that can delete production can usually delete same-account backups too.",
+          "Inventory every stateful component: databases, object storage, queues holding unprocessed work, search indexes, secrets, and configuration that lives outside infrastructure as code.",
+          "Keep the keys. Encrypted backups are worthless if the key that encrypted them was deleted or lives only in the region you lost.",
+          "Write the runbook as commands, not prose, and keep a copy outside the environment it describes.",
+        ],
+      },
+      { type: "h2", text: "Run the drill" },
+      {
+        type: "p",
+        text: "A restore drill is a scheduled exercise: restore the most recent backup into an isolated environment, bring the application up against it, run checks that prove the data is complete, and record how long each step took. Do it quarterly at minimum, and rotate who runs it so the knowledge does not sit with one person.",
+      },
+      {
+        type: "code",
+        lang: "bash",
+        code: "#!/usr/bin/env bash\nset -euo pipefail\n# Quarterly restore drill: point-in-time restore into an isolated drill instance.\nSTART=$(date +%s)\nTARGET_TIME=$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)\n\naws rds restore-db-instance-to-point-in-time \\\n  --source-db-instance-identifier prod-main \\\n  --target-db-instance-identifier drill-$(date +%Y%m%d) \\\n  --restore-time \"$TARGET_TIME\" \\\n  --db-subnet-group-name drill-isolated \\\n  --no-publicly-accessible\n\naws rds wait db-instance-available --db-instance-identifier drill-$(date +%Y%m%d)\nRESTORED=$(date +%s)\n\n# Prove the data, not just the instance: compare row counts and latest timestamps.\n./scripts/verify-restore.sh \"drill-$(date +%Y%m%d)\" \"$TARGET_TIME\"\n\necho \"restore_seconds=$((RESTORED - START))\"\necho \"total_seconds=$(( $(date +%s) - START ))\"",
+      },
+      {
+        type: "p",
+        text: "The verification step matters as much as the restore. An instance that boots is not proof; row counts for key tables, the newest record timestamp compared with the target time, and a smoke test of the application against the restored data are. Compare the measured time against the RTO and the data gap against the RPO, and file anything that missed as a bug with an owner.",
+      },
+      { type: "h3", text: "Practise the decision, not just the restore" },
+      {
+        type: "p",
+        text: "Real disasters are ambiguous. Someone has to decide to fail over, which version of the data to trust, and how to tell customers. Include that in the drill: who declares the incident, who approves a restore that will lose some data, and how the application is pointed at the restored database. The technical steps are usually the faster part.",
+      },
+      {
+        type: "quote",
+        text: "Your recovery time is whatever your last drill measured. Everything else is an estimate.",
+      },
+      {
+        type: "p",
+        text: "Write RPO and RTO down per system with the people who own the risk, design backups that can actually meet them, store copies where a compromised account cannot reach, and restore on a schedule with verification and a stopwatch. The first drill is usually uncomfortable. That is the point: it is far cheaper to find the missing key or the forgotten bucket on a quiet Tuesday than during an outage.",
+      },
+    ],
+  },
+  {
+    slug: "documentation-as-code",
+    title: "Documentation as Code",
+    description:
+      "Docs rot because they live away from the code and nobody reviews them. Treating documentation like code — versioned, reviewed, tested and generated where possible — keeps it close to the truth.",
+    date: "2026-11-17",
+    readingTime: "8 min read",
+    category: "Developer Productivity",
+    tags: ["Documentation", "Developer Experience", "CI/CD", "Docs as Code", "Engineering Culture"],
+    content: [
+      {
+        type: "p",
+        text: "Every team has a wiki that was accurate for about three weeks. The setup guide references an environment variable that was renamed, the architecture diagram shows a service that was merged into another, and the API page documents parameters the endpoint stopped accepting last spring. New engineers learn quickly that the docs are a rough suggestion and the real knowledge lives in Slack threads and in whoever has been around longest.",
+      },
+      {
+        type: "p",
+        text: "The cause is structural, not a lack of discipline. Documentation that lives in a separate tool, edited separately from the code it describes and reviewed by nobody, will drift. Docs as code fixes the structure: the documentation sits in the repository, changes in the same pull request as the behaviour, and goes through the same review and checks.",
+      },
+      { type: "h2", text: "What 'as code' actually means" },
+      {
+        type: "ul",
+        items: [
+          "Docs live next to what they describe: a README per service, an architecture folder for decisions and diagrams, a runbook per alert. Markdown in the repository, not pages in a separate system.",
+          "Changes are reviewed. A pull request that changes an endpoint and its documentation together is reviewed together; a pull request that changes the endpoint alone invites the question 'where is the doc update?'.",
+          "Docs are built and checked in CI: broken links, missing pages in navigation, code samples that no longer compile, spelling in the house style.",
+          "Generated where the source of truth is code: API references from OpenAPI specs or type definitions, configuration references from the config schema, CLI help from the command definitions.",
+          "Decisions are recorded as short, dated architecture decision records, so the 'why' survives the people who made the call.",
+        ],
+      },
+      { type: "h2", text: "Generate the parts that drift fastest" },
+      {
+        type: "p",
+        text: "Reference material is where hand-written docs rot first, because it changes with every feature. If your API is described by an OpenAPI document, generate the reference from it and fail the build when the spec and the implementation disagree. If configuration is read from typed settings, generate the table of options from that definition. Humans should write explanations, tutorials and trade-offs; machines should write lists of parameters.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "# .github/workflows/docs.yml\nname: docs\non:\n  pull_request:\n    paths: [\"docs/**\", \"openapi/**\", \"src/**\"]\njobs:\n  check:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      - name: Regenerate API reference from the spec\n        run: npx @redocly/cli build-docs openapi/api.yaml -o docs/api/index.html\n      - name: Fail if generated docs are stale\n        run: git diff --exit-code docs/api/\n      - name: Check links\n        run: npx markdown-link-check --quiet docs/**/*.md\n      - name: Lint prose\n        run: npx markdownlint-cli2 \"docs/**/*.md\"\n      - name: Build site\n        run: npm run docs:build",
+      },
+      { type: "h2", text: "Make the right thing the easy thing" },
+      {
+        type: "p",
+        text: "Process alone does not change behaviour; friction does. Add a documentation checkbox to the pull request template so reviewers ask. Use code owners so that changes under a service's directory request review from the people who know whether the doc is right. Keep templates for runbooks and decision records short enough that writing one takes ten minutes, not an afternoon.",
+      },
+      {
+        type: "p",
+        text: "Equally important is deciding what not to document. A page nobody reads still has to be maintained. Prefer fewer, accurate documents — how to run it, how it is deployed, how to respond to each alert, why the big decisions were made — over an exhaustive tree that nobody trusts.",
+      },
+      { type: "h3", text: "Test the onboarding path" },
+      {
+        type: "p",
+        text: "The best documentation test is a new engineer following the setup guide on a clean machine and fixing every step that fails as part of their first pull request. It costs nothing extra, keeps the most important page honest, and gives the newcomer a meaningful first contribution.",
+      },
+      {
+        type: "quote",
+        text: "If the docs can be wrong without a build failing or a reviewer noticing, they will be.",
+      },
+      {
+        type: "p",
+        text: "Move documentation into the repository, review it with the change it describes, generate the reference material from the source of truth, and let CI catch broken links and stale output. Keep the hand-written parts focused on the things code cannot say — intent, trade-offs and how to operate the system under stress. Documentation stops being a separate chore and becomes part of finishing the work.",
+      },
+    ],
+  },
+  {
+    slug: "long-workflows-drafts-state-resumability",
+    title: "Long Workflows: Drafts, State, and Resumability",
+    description:
+      "Onboarding wizards, multi-step approvals and AI pipelines all outlive a single request. Designing workflows that save drafts, survive crashes and resume from the right step without repeating side effects.",
+    date: "2026-11-18",
+    readingTime: "9 min read",
+    category: "System Design",
+    tags: ["Workflows", "State Machines", "Resumability", "Idempotency", "System Design"],
+    content: [
+      {
+        type: "p",
+        text: "A surprising amount of business software is long workflows dressed up as forms. A customer onboarding flow spans five screens and a document upload. A loan application waits two days for a credit check and an underwriter. An AI pipeline extracts, classifies, enriches and drafts a response across several model calls. Each of these takes longer than one HTTP request, and each will be interrupted — by a closed tab, a deploy, a timeout or a failed external call.",
+      },
+      {
+        type: "p",
+        text: "The typical first version keeps progress in the session or in memory, runs the steps in one long job, and starts over when anything fails. Users lose work, side effects such as emails or charges happen twice on retry, and support cannot tell where a stuck case actually is. Resumability needs to be designed in, not bolted on.",
+      },
+      { type: "h2", text: "Make the workflow a persisted state machine" },
+      {
+        type: "p",
+        text: "Model the workflow as an explicit record with a current state, the data collected so far and a history of transitions. Every step reads the record, does its work and writes the next state in a single transaction. Allowed transitions are defined in code, so a case cannot jump from 'draft' to 'approved' because two requests raced. The record is the single answer to 'where is this case?', for users, workers and support alike.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "final class ApplicationWorkflow\n{\n    private const TRANSITIONS = [\n        'draft'            => ['submitted'],\n        'submitted'        => ['checks_running'],\n        'checks_running'   => ['awaiting_review', 'checks_failed'],\n        'checks_failed'    => ['checks_running'],\n        'awaiting_review'  => ['approved', 'rejected'],\n    ];\n\n    public function advance(Application $app, string $to, array $data = []): void\n    {\n        DB::transaction(function () use ($app, $to, $data) {\n            $locked = Application::whereKey($app->id)->lockForUpdate()->firstOrFail();\n\n            $from = $locked->state;\n\n            if (! in_array($to, self::TRANSITIONS[$from] ?? [], true)) {\n                throw new InvalidTransition($from, $to);\n            }\n\n            $locked->forceFill([\n                'state'   => $to,\n                'payload' => array_merge($locked->payload ?? [], $data),\n            ])->save();\n\n            $locked->transitions()->create(['from' => $from, 'to' => $to]);\n        });\n    }\n}",
+      },
+      { type: "h2", text: "Drafts are a feature, not a cache" },
+      {
+        type: "p",
+        text: "For user-facing multi-step forms, save the draft server-side as the user moves between steps, against their account and the workflow record, not in browser storage alone. Validate each step for what that step needs and save partial data even when later steps are incomplete. Then the user can leave, come back on another device, or hand over to a colleague, and support can see exactly what was entered. Decide explicitly how long drafts live and clean them up, because abandoned drafts accumulate quickly and often contain personal data.",
+      },
+      { type: "h2", text: "Resume without repeating side effects" },
+      {
+        type: "ul",
+        items: [
+          "Give every side-effecting step an idempotency key derived from the workflow ID and step name, and pass it to external services that support one, such as payment providers. A retry then returns the original result instead of charging twice.",
+          "Record step outputs on the workflow before moving on. On resume, a step that already has a recorded output is skipped, not re-run.",
+          "Never hold a database transaction open across a slow external call. Record intent, commit, make the call, then record the result in a second transaction.",
+          "Make waiting a state. 'Awaiting credit check' with a timeout and a scheduled check is resumable; a job sleeping in a loop is not.",
+          "Version the workflow definition. Cases started under the old steps should finish under them, or be migrated deliberately.",
+        ],
+      },
+      { type: "h3", text: "When to reach for a workflow engine" },
+      {
+        type: "p",
+        text: "A state column, a transitions table and idempotent queued jobs carry most applications a long way. When workflows have many branches, long timers, compensation logic across several services or need durable execution of code paths, a dedicated engine such as Temporal or a cloud step-function service starts to pay for its operational cost. The design principles stay the same; the engine just enforces them.",
+      },
+      {
+        type: "quote",
+        text: "Any workflow that cannot answer 'where is this case and what happens next?' from the database is a workflow that will need an engineer to answer it at three in the morning.",
+      },
+      {
+        type: "p",
+        text: "Persist the workflow as a state machine with explicit transitions, save drafts on the server as a real feature, record each step's output, and key every side effect so a retry is harmless. Do that and a crash, a deploy or a user closing the tab becomes a pause rather than a corruption — and the support question 'what happened to my application?' becomes a database query instead of an investigation.",
+      },
+    ],
+  },
+  {
+    slug: "synthetic-data-for-testing-and-evals",
+    title: "Synthetic Data for Testing and Evals",
+    description:
+      "Real data is sensitive, sparse in the cases that matter and slow to label. How to generate synthetic data with LLMs and code that actually improves tests and evals, and how to stop it lying to you.",
+    date: "2026-11-19",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["Synthetic Data", "Evals", "LLM", "Testing", "Privacy"],
+    content: [
+      {
+        type: "p",
+        text: "Every eval set and test suite eventually hits the same wall. The production data that would make the best test cases contains personal information you cannot copy into a repository. The rare cases that break the system — the malformed invoice, the angry customer writing in two languages, the contract with a clause nobody expected — barely appear in any sample. And labelling a few hundred real examples takes weeks of a domain expert's time.",
+      },
+      {
+        type: "p",
+        text: "Synthetic data is the obvious answer, and modern models make it cheap to produce thousands of plausible examples in minutes. The risk is that plausible is not the same as representative. A model asked to write test cases will happily write cases that are easy for models, cluster around the same phrasing, and miss the weirdness that real users bring.",
+      },
+      { type: "h2", text: "Where synthetic data earns its place" },
+      {
+        type: "ul",
+        items: [
+          "Edge-case coverage: generating many variants of a rare failure — missing fields, conflicting dates, mixed languages — once you have seen one real example.",
+          "Privacy-safe fixtures: realistic records with fake names, addresses and identifiers for development, demos and shared test suites.",
+          "Adversarial and safety evals: prompt-injection attempts, out-of-scope requests and policy edge cases that you would rather not wait to see in production.",
+          "Load and performance testing, where volume and distribution matter more than the exact content.",
+          "Bootstrapping an eval set for a new feature before real traffic exists, with the explicit plan to replace it as production samples arrive.",
+        ],
+      },
+      { type: "h2", text: "Generate from structure, not from a blank prompt" },
+      {
+        type: "p",
+        text: "Asking a model to 'generate 200 customer support tickets' produces 200 variations of the same polite ticket. Instead, define the dimensions that matter — intent, product area, tone, language, length, presence of an attachment, a specific defect — and sample combinations in code. The model then writes one example per combination. You control the distribution; the model supplies the surface text. Seeding with real but anonymised examples as style references keeps the output closer to how your users actually write.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "import itertools, json, random\n\nDIMENSIONS = {\n    \"intent\":   [\"refund\", \"invoice_query\", \"cancel\", \"bug_report\"],\n    \"tone\":     [\"neutral\", \"frustrated\", \"terse\"],\n    \"language\": [\"en\", \"en_with_spanish_phrases\"],\n    \"defect\":   [None, \"missing_order_id\", \"two_requests_in_one\", \"wrong_product_name\"],\n}\n\ndef plan(n: int, seed: int = 7) -> list[dict]:\n    rng = random.Random(seed)\n    grid = [dict(zip(DIMENSIONS, combo)) for combo in itertools.product(*DIMENSIONS.values())]\n    return rng.sample(grid, k=min(n, len(grid)))\n\ndef generate(client, spec: dict, style_examples: list[str]) -> dict:\n    prompt = (\n        \"Write one customer support email matching this spec exactly.\\n\"\n        f\"Spec: {json.dumps(spec)}\\n\"\n        \"Match the style of these anonymised real emails:\\n\" + \"\\n---\\n\".join(style_examples)\n    )\n    text = client.complete(prompt, temperature=0.9)\n    # The spec is the label: we know the right answer because we chose it.\n    return {\"input\": text, \"expected_intent\": spec[\"intent\"], \"spec\": spec}",
+      },
+      {
+        type: "p",
+        text: "The important property is that labels come from the plan, not from a model judging its own output. You chose the intent and the defect, so you know the correct answer without a labelling pass — provided you check that the generated text actually matches the spec.",
+      },
+      { type: "h2", text: "Keep it honest" },
+      {
+        type: "p",
+        text: "Synthetic data has failure modes of its own. Validate every generated example against its spec, with a cheap classifier or a second model, and discard the ones that drifted. Deduplicate aggressively, because generators repeat themselves. Use a different model family for generation than the one under test where you can, so the eval is not quietly measuring how well a model recognises its own writing.",
+      },
+      {
+        type: "p",
+        text: "Most importantly, never let synthetic data be the only evidence. Keep a smaller set of real, anonymised production cases as the anchor, and compare scores across both. If the system scores far better on synthetic cases than on real ones, the synthetic set is too easy, and that gap is itself a useful finding.",
+      },
+      { type: "h3", text: "Mind the privacy boundary" },
+      {
+        type: "p",
+        text: "Generating 'realistic' data from real records can leak them: a model given a real customer's history as a style example may reproduce identifiable details. Anonymise inputs before they become style references, and scan generated output for real names, emails and account numbers before it is committed anywhere.",
+      },
+      {
+        type: "quote",
+        text: "Synthetic data is excellent at covering the cases you can imagine. Production is where you find out which ones you could not.",
+      },
+      {
+        type: "p",
+        text: "Use synthetic data to fill coverage gaps, protect privacy and test the edges, but generate it from an explicit plan of dimensions, validate it against that plan, and anchor every conclusion to a set of real cases. Treated that way, it makes tests and evals broader and faster to build. Treated as a substitute for reality, it gives you a green dashboard for a system your users have not met.",
+      },
+    ],
+  },
+  {
+    slug: "form-requests-validation-complex-laravel-domains",
+    title: "Form Requests and Validation for Complex Laravel Domains",
+    description:
+      "Validation in a real Laravel domain is more than 'required|string'. Structuring Form Requests for conditional rules, nested data, tenant-aware lookups and authorisation without turning them into a second service layer.",
+    date: "2026-11-20",
+    readingTime: "9 min read",
+    category: "Laravel",
+    tags: ["Laravel", "Validation", "Form Requests", "PHP", "Multi-Tenancy"],
+    content: [
+      {
+        type: "p",
+        text: "Form Requests start out as the tidiest part of a Laravel codebase: a class, a rules array, a clean controller. Then the domain grows. An order can be for a customer or a walk-in, line items may reference products or free-text services, discounts depend on the customer's contract, and every ID in the payload must belong to the caller's tenant. The rules array becomes a hundred lines of nested conditionals, and validation logic starts leaking into controllers and services where nobody expects to find it.",
+      },
+      {
+        type: "p",
+        text: "The opposite failure is just as common: Form Requests stay thin, and the real checks happen deep in a service, which throws generic exceptions that become 500 errors instead of field-level messages. Getting validation right in a complex domain is about deciding which checks belong where, and then making the Form Request carry its share cleanly.",
+      },
+      { type: "h2", text: "What belongs in the Form Request" },
+      {
+        type: "ul",
+        items: [
+          "Shape and type: required fields, formats, enums, array structure, maximum sizes. Everything that can be judged from the payload alone.",
+          "Existence within the caller's scope: an ID refers to a record that exists and belongs to the current tenant. An unscoped 'exists' rule is an information leak and an authorisation bug waiting to happen.",
+          "Conditional requirements that are part of the input contract: a delivery address is required when the delivery method is 'courier'.",
+          "Authorisation of the action itself through 'authorize()', delegating to a policy rather than reimplementing permission logic.",
+          "Not business invariants that depend on concurrent state, such as stock levels or credit limits. Those belong in the service, inside the transaction that relies on them.",
+        ],
+      },
+      { type: "h2", text: "A worked example" },
+      {
+        type: "p",
+        text: "Here is a store-order request that handles conditional fields, nested line items and tenant-scoped existence checks. It uses 'Rule::exists' with a where clause for scoping, 'exclude_unless' and 'required_without' for conditional data, and keeps the cross-field check that needs several values in 'after()'.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "class StoreOrderRequest extends FormRequest\n{\n    public function authorize(): bool\n    {\n        return $this->user()->can('create', Order::class);\n    }\n\n    public function rules(): array\n    {\n        $tenantId = $this->user()->tenant_id;\n        $scoped = fn (string $table) => Rule::exists($table, 'id')->where('tenant_id', $tenantId);\n\n        return [\n            'customer_id'           => ['nullable', 'integer', $scoped('customers')],\n            'delivery_method'       => ['required', Rule::in(['pickup', 'courier'])],\n            'delivery_address'      => ['exclude_unless:delivery_method,courier', 'required', 'array'],\n            'delivery_address.line1'    => ['required_with:delivery_address', 'string', 'max:200'],\n            'delivery_address.postcode' => ['required_with:delivery_address', 'string', 'max:12'],\n            'lines'                 => ['required', 'array', 'min:1', 'max:200'],\n            'lines.*.product_id'    => ['nullable', 'integer', $scoped('products')],\n            'lines.*.description'   => ['required_without:lines.*.product_id', 'nullable', 'string', 'max:500'],\n            'lines.*.quantity'      => ['required', 'integer', 'min:1', 'max:10000'],\n        ];\n    }\n\n    public function after(): array\n    {\n        return [function (Validator $validator) {\n            if ($this->input('delivery_method') === 'courier' && $this->input('customer_id') === null) {\n                $validator->errors()->add('customer_id', 'Courier delivery requires a registered customer.');\n            }\n        }];\n    }\n}",
+      },
+      {
+        type: "p",
+        text: "Two details matter. The scoped closure means every existence check carries the tenant constraint, so a payload containing another tenant's product ID fails validation with a normal 422 instead of leaking whether that record exists. And the controller should consume only 'validated()' — never 'all()' — so fields that were excluded or never declared cannot reach mass assignment.",
+      },
+      { type: "h2", text: "Keeping large requests readable" },
+      {
+        type: "p",
+        text: "When a request grows past what fits on a screen, extract reusable pieces rather than adding layers. Custom rule objects work well for domain concepts used in several places, such as a valid VAT number or a slot that falls within opening hours. A shared trait or a small method that returns the rules for an address block keeps create and update requests consistent. For update requests, use 'sometimes' so that partial updates validate only the fields present, and keep the same scoping helpers so the tenant rule is never forgotten on the path that gets less testing.",
+      },
+      { type: "h3", text: "Test the boundaries, not the framework" },
+      {
+        type: "p",
+        text: "Feature tests should cover the cases that encode your domain: a missing conditional field, another tenant's ID, a free-text line with no description, a user without permission. There is no value in testing that 'max:200' rejects 201 characters; there is a lot of value in proving that a cross-tenant product ID returns a validation error and not a created order.",
+      },
+      {
+        type: "quote",
+        text: "Validation is the first line of your API contract. If a rule only exists inside a service exception, your clients will discover it as a 500.",
+      },
+      {
+        type: "p",
+        text: "Let Form Requests own shape, conditional requirements, tenant-scoped existence and action authorisation; let services own invariants that depend on live state and transactions. Scope every lookup, consume only validated data, extract domain rules into named objects when they repeat, and test the cases that are about your business rather than the framework. The result is validation that stays readable as the domain grows and errors that clients can actually act on.",
+      },
+    ],
+  },
+  {
+    slug: "message-ordering-when-order-matters",
+    title: "Message Ordering: When Order Matters and How to Get It",
+    description:
+      "Queues and event streams reorder messages more often than teams expect. Which operations actually need ordering, how partition keys and FIFO groups provide it, and how to design consumers that tolerate disorder.",
+    date: "2026-11-21",
+    readingTime: "9 min read",
+    category: "Distributed Systems",
+    tags: ["Messaging", "Event-Driven", "Kafka", "SQS", "Distributed Systems"],
+    content: [
+      {
+        type: "p",
+        text: "A customer updates their address twice in quick succession. Both changes are published as events, two consumer workers pick them up in parallel, and the older update finishes last. The customer now has their previous address, the system shows no error, and the next parcel goes to the wrong house. Ordering bugs look like this: rare, silent and very hard to reproduce on a developer machine.",
+      },
+      {
+        type: "p",
+        text: "Most messaging systems do not give you global ordering, and the ones that appear to stop doing so the moment you add parallel consumers, retries or a dead-letter queue. The useful question is not 'how do we make everything ordered?' but 'which things need ordering relative to which other things, and what happens if they arrive out of order anyway?'",
+      },
+      { type: "h2", text: "Order per entity, not globally" },
+      {
+        type: "p",
+        text: "Almost no business process needs every message in the system processed in sequence. What usually matters is order per entity: all events for one order, one account or one customer must be applied in the sequence they happened. That scope is what lets ordering coexist with throughput. Kafka guarantees order within a partition, so choosing the entity ID as the message key keeps an entity's events together. SQS FIFO queues guarantee order within a message group, so the entity ID becomes the group ID. Other entities proceed in parallel.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Pick the ordering key carefully. If events for an order and its invoice must be ordered together, the key is the order ID for both, not each entity's own ID.",
+          "Watch for hot keys. One very busy tenant or account used as the key funnels all its traffic through one partition or group and caps throughput for that entity.",
+          "Retries can break ordering. A consumer that skips a failing message and continues with the next one for the same key has just reordered them. Either block the key until the message succeeds or park it with the rest of that key's messages.",
+          "Changing partition counts remaps keys to partitions, which can briefly interleave old and new messages for the same entity. Plan repartitioning like a migration.",
+          "Producers can reorder too. Retries with several in-flight requests may reorder writes unless the client is configured for idempotent, ordered delivery.",
+        ],
+      },
+      { type: "h2", text: "Design consumers that tolerate disorder anyway" },
+      {
+        type: "p",
+        text: "Even with careful keys, assume a message can arrive late, twice or after a newer one. The most robust defence is to carry a version or sequence number with every event and have the consumer apply it only if it is newer than what is stored. The write then becomes conditional, and an out-of-order message is ignored rather than applied.",
+      },
+      {
+        type: "code",
+        lang: "sql",
+        code: "-- Each event carries the entity's version at the time it was produced.\n-- Apply only if it is newer than what we already have; stale events become no-ops.\nINSERT INTO customer_addresses (customer_id, line1, postcode, version, updated_at)\nVALUES ($1, $2, $3, $4, now())\nON CONFLICT (customer_id) DO UPDATE\nSET line1      = EXCLUDED.line1,\n    postcode   = EXCLUDED.postcode,\n    version    = EXCLUDED.version,\n    updated_at = now()\nWHERE customer_addresses.version < EXCLUDED.version;\n\n-- Track processed message IDs so a redelivered message is not applied twice.\nINSERT INTO processed_messages (message_id, processed_at)\nVALUES ($5, now())\nON CONFLICT (message_id) DO NOTHING;",
+      },
+      {
+        type: "p",
+        text: "Run both statements in one transaction and the consumer becomes idempotent and order-tolerant at once. Where events are not full snapshots but deltas — 'add ten to the balance' — version checks alone are not enough, because skipping a stale delta loses data. Those consumers need either strict per-key ordering with blocking retries, or a redesign so events carry the resulting state rather than the change.",
+      },
+      { type: "h3", text: "Prefer state over commands where you can" },
+      {
+        type: "p",
+        text: "An event that says 'address is now X as of version 7' is far easier to apply safely than one that says 'change address'. State-carrying events make the last-writer-wins comparison trivial and make replays harmless. Keep deltas for cases where the history itself is the product, such as a ledger, and give those the strict ordering they require.",
+      },
+      {
+        type: "quote",
+        text: "Ordering is a property of a key, not of a queue. Decide the key, and you have decided what you can promise.",
+      },
+      {
+        type: "p",
+        text: "Identify which entities need ordering, use their IDs as partition keys or message groups, and handle retries so a failing message does not let its successors overtake it. Then make consumers defensive with versions and processed-message records so that disorder becomes a no-op rather than corruption. Ordering guarantees from the broker are a useful foundation; consumers that do not depend on them completely are what keep the data right.",
+      },
+    ],
+  },
+  {
+    slug: "scope-negotiation-as-an-fde",
+    title: "Scope Negotiation as an FDE: Saying No Without Losing the Customer",
+    description:
+      "Forward-deployed engineers sit where customer wishes meet product reality. How to turn 'can you also...' into a clear trade, protect the deadline and the product, and keep the relationship stronger for it.",
+    date: "2026-11-22",
+    readingTime: "8 min read",
+    category: "Engineering",
+    tags: ["Forward Deployed Engineering", "Scope Management", "Customer Success", "Communication", "Consulting"],
+    content: [
+      {
+        type: "p",
+        text: "The request usually arrives casually, at the end of a good meeting: 'While you're in there, could it also export to our finance system?' The customer is not being unreasonable. They see an engineer who clearly understands their problem and is already working on it, so asking costs them nothing. For the forward-deployed engineer, each of those requests is a small loan against the deadline, the product's coherence and the team's maintenance budget.",
+      },
+      {
+        type: "p",
+        text: "Saying yes to everything feels like good service until the pilot runs late, the one-off export breaks during the next release, and the customer's trust erodes over missed dates rather than over any single refusal. Saying no bluntly protects the plan but damages the relationship. The skill is in turning requests into choices the customer makes with full information.",
+      },
+      { type: "h2", text: "Understand the request before answering it" },
+      {
+        type: "p",
+        text: "Most scope requests are a solution the customer has already designed in their head. Before discussing whether to build it, ask what problem it solves, who feels that problem, how often, and what they do today. 'Export to our finance system' might turn out to be one person re-keying ten invoices a month, which a scheduled CSV covers, or a month-end close blocker that genuinely changes the value of the whole project. You cannot negotiate scope sensibly until you know which.",
+      },
+      { type: "h2", text: "Make every yes a trade" },
+      {
+        type: "ul",
+        items: [
+          "Name the cost in the customer's currency: 'Adding this moves the go-live by about a week, or we drop the approval dashboard from phase one. Which matters more to you?'",
+          "Offer the smallest version that solves the real problem: a report instead of an integration, a manual step with a checklist instead of an automation, a configuration instead of custom code.",
+          "Separate 'not now' from 'not ever'. Put deferred items on a visible list with the customer, so they see the request was heard and has a place to land.",
+          "Protect the product. If a request only makes sense for this one customer and would fork the codebase, say so plainly and route it to the product team as feedback rather than building it in the field.",
+          "Write it down. Every agreed change to scope, with its trade-off, goes into the shared plan the same day. Verbal scope changes are remembered differently by each side.",
+        ],
+      },
+      { type: "h2", text: "Say no with a reason and a path" },
+      {
+        type: "p",
+        text: "A good refusal has three parts: the decision, the reason, and what happens next. 'We won't build the custom export in this pilot, because it would push the go-live past your board meeting, but we'll give you a CSV that covers the monthly reconciliation and raise the integration with our product team for the roadmap review.' The customer may still be disappointed, but they are not confused, and they have something concrete to take back to their own stakeholders.",
+      },
+      {
+        type: "p",
+        text: "Escalate early when the request is really about something bigger — a gap in the product, a mismatch between what was sold and what is being delivered, or a sponsor whose priorities changed. Those are not yours to absorb quietly by working weekends. Raise them with your account lead and the customer sponsor together, with options rather than complaints.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "# change-log.yaml — kept in the shared project folder, reviewed weekly with the customer\n- id: CR-014\n  requested_by: Finance lead\n  date: 2026-11-04\n  request: Export approved invoices to the finance system\n  underlying_need: Month-end reconciliation currently re-keys approved invoices by hand\n  options:\n    - option: Scheduled CSV export to shared folder\n      effort_days: 1\n      impact: None on go-live\n    - option: Direct API integration\n      effort_days: 8\n      impact: Go-live moves by roughly a week, or approval dashboard deferred\n  decision: CSV export in phase one; API integration to product roadmap review\n  decided_by: Customer sponsor and FDE lead\n  status: agreed",
+      },
+      {
+        type: "quote",
+        text: "Customers rarely remember the features you declined. They always remember the date you missed.",
+      },
+      {
+        type: "p",
+        text: "Scope negotiation is not about defending a plan against the customer; it is about making trade-offs visible so the customer can steer with you. Understand the need behind each request, offer the smallest thing that solves it, attach a clear cost to every yes, and give every no a reason and a path. Keep the log of decisions where both sides can see it. Done consistently, it makes you more trusted, not less — because what you commit to actually ships.",
+      },
+    ],
+  },
+  {
+    slug: "observability-costs-sampling-cardinality-log-budgets",
+    title: "Observability Costs: Sampling, Cardinality, and Log Budgets",
+    description:
+      "Observability bills grow faster than traffic because every new label, log line and span multiplies. Practical controls — sampling, cardinality discipline and log budgets — that cut cost without blinding you during incidents.",
+    date: "2026-11-23",
+    readingTime: "9 min read",
+    category: "Cloud",
+    tags: ["Observability", "Cost Optimisation", "Logging", "OpenTelemetry", "Metrics"],
+    content: [
+      {
+        type: "p",
+        text: "Observability bills have an awkward habit of outgrowing the infrastructure they observe. Traffic doubles and logging costs quadruple, because each new feature added a few debug lines, someone put a user ID on a metric label, and tracing records every span of every request. Eventually finance asks why monitoring costs a large fraction of the hosting bill, and the reflex response — turn retention down and drop debug logs everywhere — removes exactly the data you need during the next incident.",
+      },
+      {
+        type: "p",
+        text: "The cost is driven by a few specific mechanisms: log volume, metric cardinality and trace volume. Each has a targeted control that saves money while keeping the signal that matters.",
+      },
+      { type: "h2", text: "Cardinality is the silent multiplier" },
+      {
+        type: "p",
+        text: "A time-series metric is stored once per unique combination of label values. A request counter labelled by method, route and status code might produce a few hundred series. Add a 'user_id' or 'tenant_id' label and it becomes hundreds of thousands, each billed and stored separately. Add a raw URL path containing IDs instead of the route template and it becomes effectively unbounded.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Label metrics only with bounded values: route templates, status classes, region, service, a small set of plan tiers. Never IDs, emails, raw paths or free-text error messages.",
+          "Put per-entity detail in logs and traces, which are designed for high-cardinality lookups, not in metrics.",
+          "Review cardinality regularly: most metrics backends can report the series count per metric. The top handful usually explain most of the bill.",
+          "Drop or aggregate unused metrics at the collector. Many libraries emit dozens of series nobody has ever charted.",
+        ],
+      },
+      { type: "h2", text: "Sample traces where the interesting ones survive" },
+      {
+        type: "p",
+        text: "Recording every trace is rarely necessary. Head sampling — deciding at the start of a request to keep, say, a small percentage — is cheap but blind: it discards errors and slow requests at the same rate as boring ones. Tail sampling decides after the trace completes, so you can keep every error, every request over a latency threshold and a small baseline of normal traffic. It costs some collector memory, and it is worth it.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "# OpenTelemetry Collector: keep errors and slow traces, sample the rest.\nprocessors:\n  tail_sampling:\n    decision_wait: 10s\n    num_traces: 50000\n    policies:\n      - name: keep-errors\n        type: status_code\n        status_code: { status_codes: [ERROR] }\n      - name: keep-slow\n        type: latency\n        latency: { threshold_ms: 1500 }\n      - name: baseline\n        type: probabilistic\n        probabilistic: { sampling_percentage: 5 }\n  attributes/scrub:\n    actions:\n      - key: http.request.header.authorization\n        action: delete\n      - key: user.email\n        action: delete",
+      },
+      {
+        type: "p",
+        text: "Tail sampling needs all spans of a trace to reach the same collector instance, so in a multi-instance deployment route by trace ID with a load-balancing exporter in front of the sampling tier. Without that, decisions are made on partial traces.",
+      },
+      { type: "h2", text: "Give logs a budget" },
+      {
+        type: "p",
+        text: "Logs are usually the largest line item. Treat volume as a budget per service: a target daily volume, an alert when a service exceeds it, and a review when a deploy causes a step change. Most overruns come from a handful of lines — a debug statement left at info level in a hot loop, a full request body logged on every call, a retry loop logging each attempt.",
+      },
+      {
+        type: "p",
+        text: "Use levels deliberately and make debug logging switchable at runtime for a specific tenant or request rather than permanently on. Route verbose, rarely queried logs to cheaper storage tiers with shorter retention, and keep audit and security logs on their own path with the retention compliance requires. Structured logs with consistent fields compress better and let you drop fields rather than entire lines.",
+      },
+      {
+        type: "quote",
+        text: "The goal is not less data. It is less data you would never look at, so the data you need is still there when it matters.",
+      },
+      {
+        type: "p",
+        text: "Find the few metrics with runaway cardinality and fix their labels, move trace sampling to the tail so errors and slow requests are always kept, and give each service a log budget with alerts on step changes. Scrub sensitive fields at the collector while you are there. These controls typically cut a large share of observability spend while making incidents easier to investigate, because the remaining data is the data someone chose to keep.",
+      },
+    ],
+  },
+  {
+    slug: "agentic-search-vs-classic-rag",
+    title: "Agentic Search vs Classic RAG",
+    description:
+      "Classic RAG retrieves once and answers. Agentic search lets the model plan queries, read results and search again. When the extra loops pay for themselves, and when a well-tuned single retrieval is still the better system.",
+    date: "2026-11-24",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["RAG", "AI Agents", "Search", "LLM", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "Classic retrieval-augmented generation has a simple shape: embed the question, retrieve the top chunks, put them in the prompt, generate an answer. It is fast, predictable and cheap, and for a large class of questions it works well. It also fails in a recognisable way. Ask something that needs two hops — 'which of our customers on the old pricing plan raised a billing complaint last quarter?' — and one retrieval pass cannot find documents that only become relevant after reading the first ones.",
+      },
+      {
+        type: "p",
+        text: "Agentic search gives the model tools instead of a fixed context: a search function, perhaps a SQL tool, a way to open a document, and the freedom to decide what to look up next. It handles multi-hop questions far better. It is also slower, more expensive and harder to evaluate, and teams adopting it everywhere tend to rediscover why single-pass retrieval became the default.",
+      },
+      { type: "h2", text: "How they differ in practice" },
+      {
+        type: "ul",
+        items: [
+          "Latency: classic RAG is one retrieval and one generation. An agent may run five to fifteen tool calls before answering, which turns a two-second response into twenty or more.",
+          "Cost: each loop re-sends the growing context. Without caching and step limits, a single hard question can cost more than hundreds of simple ones.",
+          "Recall on complex questions: agents win clearly when the answer requires decomposition, following references, combining structured and unstructured sources, or reformulating after a poor first search.",
+          "Predictability: classic RAG fails in ways you can debug by inspecting the retrieved chunks. Agent failures depend on the path taken, so the same question can succeed on one run and fail on the next.",
+          "Evaluation: RAG can be evaluated as retrieval quality plus answer quality. Agents also need trajectory evaluation — did it search sensibly, stop at the right time, and avoid redundant calls.",
+        ],
+      },
+      { type: "h2", text: "Route, do not replace" },
+      {
+        type: "p",
+        text: "The most effective production systems rarely choose one approach. They route. Simple factual lookups go through a single well-tuned retrieval with hybrid keyword and vector search and a reranker. Questions that look multi-part, comparative or analytical go to an agent loop with a step budget. A cheap classifier, or even a few rules on the question's structure, decides which path to take, and the agent path can itself fall back to a direct answer when its first search is enough.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "MAX_STEPS = 6\n\ndef answer(question: str, user) -> dict:\n    route = classify(question)  # 'lookup' or 'research', cheap model or rules\n\n    if route == \"lookup\":\n        chunks = hybrid_search(question, tenant=user.tenant_id, k=8)\n        return generate(question, rerank(question, chunks)[:5], citations=True)\n\n    notes, trace = [], []\n    for step in range(MAX_STEPS):\n        action = plan_next(question, notes)  # model returns a tool call or 'final'\n        trace.append(action)\n        if action.tool == \"final\":\n            return {**generate(question, notes, citations=True), \"trace\": trace}\n        if action.tool == \"search\":\n            notes += hybrid_search(action.query, tenant=user.tenant_id, k=5)\n        elif action.tool == \"sql\":\n            notes.append(run_readonly_sql(action.query, tenant=user.tenant_id))\n\n    # Budget exhausted: answer with what we have and say so.\n    return {**generate(question, notes, citations=True, partial=True), \"trace\": trace}",
+      },
+      {
+        type: "p",
+        text: "Two details in that sketch carry most of the safety. Every tool call is scoped to the caller's tenant by the code, not by the model's choice of arguments, so an agent cannot search its way into another customer's documents. And the step budget ends in a partial answer that admits its limits rather than an error or an unbounded loop.",
+      },
+      { type: "h2", text: "Fix retrieval before adding agency" },
+      {
+        type: "p",
+        text: "A common pattern is reaching for agents because single-pass RAG gives poor answers, when the real problem is retrieval quality: chunks that split tables in half, no keyword search for product codes and names, no reranking, missing metadata filters. An agent built on weak retrieval simply performs more weak searches. Measure retrieval recall on a set of real questions first; if the right documents are not in the top results, no amount of planning will fix it.",
+      },
+      {
+        type: "quote",
+        text: "An agent is a loop around your search engine. If the search is poor, you have bought a more expensive way to be wrong.",
+      },
+      {
+        type: "p",
+        text: "Use classic RAG as the default for direct questions and invest in making its retrieval excellent. Add agentic search for the questions that genuinely need decomposition or several sources, behind a router, with tenant-scoped tools, a hard step budget and trajectory logging. Evaluate both paths on real questions, and let the measurements decide how much traffic each deserves.",
+      },
+    ],
+  },
+  {
+    slug: "a-year-of-production-ai-what-held-up",
+    title: "A Year of Production AI: What Held Up",
+    description:
+      "Looking back across a year of shipping LLM features: the practices that kept proving their worth — evals, structured outputs, tool contracts, routing, cost controls, guardrails — and the ideas that turned out to be mostly noise.",
+    date: "2026-11-25",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["Production AI", "LLM", "Evals", "AI Engineering", "Retrospective"],
+    content: [
+      {
+        type: "p",
+        text: "A year is long enough in this field for several waves of excitement to arrive and recede. New model releases, new agent frameworks, new prompting techniques and new acronyms each had their moment of being the thing every team needed. Looking back across the LLM features shipped and maintained over that time, the interesting question is not what was new, but what is still standing — the practices that kept paying off release after release, regardless of which model sat underneath.",
+      },
+      {
+        type: "p",
+        text: "The short answer is that the durable parts were the unglamorous ones. They look a lot like ordinary software engineering applied to a component that is probabilistic, priced per token and changes underneath you.",
+      },
+      { type: "h2", text: "What held up" },
+      {
+        type: "ul",
+        items: [
+          "Evals as a merge gate. Teams with a curated eval set that ran in CI could change prompts, swap models and refactor retrieval with confidence. Teams without one shipped regressions and found them in support tickets. Nothing else on this list matters as much.",
+          "Structured outputs. Asking for JSON that matches a schema, validating it, and retrying or failing cleanly on violations turned model output from text to be parsed hopefully into data a system can trust. It removed a whole category of production bugs.",
+          "Tool contracts. Treating each tool an agent can call like a public API — typed parameters, narrow scope, permission checks in code, idempotent where it writes — made agents safer and easier to debug than any amount of prompt instruction.",
+          "Model routing. Sending easy tasks to small, fast models and reserving large models for hard ones kept latency and cost sensible, and made swapping models a configuration change rather than a rewrite.",
+          "Cost controls from day one. Per-tenant metering, prompt caching, token budgets and graceful degradation were far easier to add while a feature was small than after a large customer had wired it into a nightly job.",
+        ],
+      },
+      { type: "h2", text: "Guardrails that were real, not decorative" },
+      {
+        type: "p",
+        text: "The guardrails that held up were the ones enforced outside the model. Tenant scoping applied by the code that executes a tool, not requested in the prompt. Allow-lists for actions with side effects. Human approval before anything irreversible. Output checks for personal data before a response leaves the system. Prompt-level instructions still helped with tone and format, but every serious safety property ended up living in deterministic code around the model, because that is the only place it can be tested.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "# The shape that kept recurring: validate, scope, budget, record.\ndef run_feature(tenant, feature: str, payload: dict) -> dict:\n    budget.check(tenant, feature)                       # cost control before spend\n    model = router.pick(feature, payload)               # small model unless it needs more\n    prompt = templates.render(feature, payload)         # versioned prompt\n\n    for attempt in range(2):\n        raw = llm.complete(model, prompt, response_schema=SCHEMAS[feature])\n        result = SCHEMAS[feature].validate(raw)         # structured output or nothing\n        if result.ok:\n            break\n    else:\n        return fallback(feature, payload)               # deterministic degraded path\n\n    guard.check_output(result.data, tenant=tenant)      # PII, policy, scope\n    usage.record(tenant, feature, model, raw.usage)     # attribution for every call\n    return result.data",
+      },
+      { type: "h2", text: "What turned out to be mostly noise" },
+      {
+        type: "p",
+        text: "Elaborate prompt tricks aged badly. Phrases that squeezed out a few points on one model often did nothing or harm on the next, while clear instructions, good examples and well-chosen context transferred across versions. Fully autonomous agents for open-ended business processes mostly stayed in demos; the agents that shipped had narrow goals, a handful of tools, step limits and a human at the decision points. Heavy orchestration frameworks adopted early often became something teams worked around, as a thin layer of their own code proved easier to debug.",
+      },
+      {
+        type: "p",
+        text: "Leaderboard-driven model choice was another recurring distraction. Public benchmarks rarely predicted performance on a specific customer's documents and tasks. A few hundred representative cases of your own data told you more about which model to use than any ranking.",
+      },
+      { type: "h3", text: "What changed underneath" },
+      {
+        type: "p",
+        text: "Models improved steadily, context windows grew and prices fell. That shifted some trade-offs — longer context made certain retrieval tricks unnecessary, cheaper models made routing more attractive — but it did not change the fundamentals. Better models made good engineering more effective; they did not make it optional.",
+      },
+      {
+        type: "quote",
+        text: "The models changed every few months. The engineering that made them trustworthy barely changed at all.",
+      },
+      {
+        type: "p",
+        text: "If you are planning the next year of AI work, invest in the things that survived this one: an eval set that gates releases, schema-validated outputs, tools designed as narrow contracts, routing across models, per-tenant cost controls and guardrails enforced in code. Treat each new model or framework as something to evaluate against that foundation, not something to rebuild around. The teams that did that spent the year shipping; the rest spent it migrating.",
+      },
+    ],
+  },
 ];
 
 export function getPost(slug: string): BlogPost | undefined {
