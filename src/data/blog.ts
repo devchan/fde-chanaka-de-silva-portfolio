@@ -5593,6 +5593,626 @@ export const blogPosts: BlogPost[] = [
       },
     ],
   },
+  {
+    slug: "eval-gated-releases-llm-regression-tests-in-ci",
+    title: "Eval-Gated Releases: LLM Regression Tests in CI",
+    description:
+      "A prompt edit is a code change with no compiler. Turning an eval set into a CI gate that blocks regressions before merge, without making every pull request slow, flaky, or expensive.",
+    date: "2026-09-19",
+    readingTime: "8 min read",
+    category: "Artificial Intelligence",
+    tags: ["LLM", "Evals", "CI/CD", "Testing", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "Most teams I work with have an eval set. Far fewer have one that can stop a merge. The set lives in a notebook, somebody runs it before a big release, and in between, prompts, retrieval settings and model versions change through ordinary pull requests that nobody evaluated. The regression shows up a week later as a support ticket, and by then three other changes have landed on top of it.",
+      },
+      {
+        type: "p",
+        text: "The fix is to treat the eval set the way you treat unit tests: it runs on every change that can affect model behaviour, and a drop below an agreed threshold fails the build. That sounds obvious. The engineering is in making it fast, cheap and stable enough that people do not learn to ignore it.",
+      },
+      { type: "h2", text: "Decide what counts as a behaviour change" },
+      {
+        type: "p",
+        text: "Running a few hundred model calls on every pull request that touches a CSS file is waste. Track the inputs that actually move outputs — prompt templates, tool schemas, retrieval configuration, chunking code, model identifiers, the output parser — and trigger the eval job only when one of those paths changes. In a monorepo that is a path filter; in a Laravel or Python service it is usually a handful of directories plus one config file.",
+      },
+      { type: "h2", text: "Three tiers, three budgets" },
+      {
+        type: "ul",
+        items: [
+          "Smoke tier on every relevant pull request: 30 to 60 cases, deterministic checks only — schema validity, required fields present, forbidden phrases absent, refusal where a refusal is correct. Runs in under two minutes.",
+          "Regression tier before merge to main: the full curated set, a few hundred cases, with graded metrics such as groundedness and task success. This is where the threshold lives.",
+          "Nightly tier: the regression set plus a fresh sample of anonymised production traffic, to catch the drift a static set will never contain.",
+        ],
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "import json, sys\nfrom statistics import mean\n\nBASELINE = json.load(open('evals/baseline.json'))\nTOLERANCE = {'schema_valid': 0.0, 'task_success': 0.02, 'grounded': 0.03}\n\ndef gate(results: list[dict]) -> int:\n    failed = []\n    for metric, allowed_drop in TOLERANCE.items():\n        score = mean(r[metric] for r in results)\n        floor = BASELINE[metric] - allowed_drop\n        status = 'ok' if score >= floor else 'REGRESSION'\n        print(f'{metric:14} {score:.3f} (baseline {BASELINE[metric]:.3f}) {status}')\n        if score < floor:\n            failed.append(metric)\n    # Print the worst individual cases so the reviewer sees *what* broke.\n    for r in sorted(results, key=lambda r: r['task_success'])[:5]:\n        print('  worst:', r['case_id'], r['task_success'], r['notes'])\n    return 1 if failed else 0\n\nif __name__ == '__main__':\n    sys.exit(gate(json.load(open(sys.argv[1]))))",
+      },
+      { type: "h2", text: "Taming non-determinism" },
+      {
+        type: "p",
+        text: "A gate that fails randomly gets disabled within a fortnight. Run at temperature zero where the task allows it, pin the model version, and for graded metrics compare against a tolerance band rather than an exact baseline. For the cases that remain noisy, run them three times and take the majority — it triples the cost of a small slice instead of making the whole suite untrustworthy. Cache responses keyed on the hash of the prompt, model and parameters so that re-running a failed pipeline does not re-bill unchanged cases.",
+      },
+      {
+        type: "p",
+        text: "Update the baseline deliberately, in its own commit, with the eval report attached. A baseline that drifts down one silent commit at a time is just a slower way of having no gate.",
+      },
+      {
+        type: "quote",
+        text: "A prompt is code that the compiler cannot check. The eval suite is the closest thing you have to a type system — so make it block the merge.",
+      },
+      {
+        type: "p",
+        text: "The output that matters most is not the pass or fail line; it is the five worst cases printed under it. Reviewers will read a concrete example of the model getting worse. They will not read a dashboard. Put the evidence in the pull request and the gate starts changing behaviour instead of just recording it.",
+      },
+    ],
+  },
+  {
+    slug: "cost-controls-for-llm-features",
+    title: "Cost Controls for LLM Features: Caching, Token Budgets, Per-Tenant Metering",
+    description:
+      "LLM spend scales with usage, prompt length and one customer's enthusiasm. The controls that keep a feature profitable: measure per tenant, cache what repeats, budget tokens, and degrade before you overspend.",
+    date: "2026-09-20",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["LLM", "Cost", "Multi-Tenancy", "Caching", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "The first invoice after an LLM feature launches is usually fine. The third one is where the conversation starts, because by then one enterprise tenant has wired the feature into a nightly job, prompts have grown by a few thousand tokens of 'helpful context', and nobody can say which customers are profitable. Cost control is not a finance problem you solve later. It is a set of engineering decisions you make while the feature is still small.",
+      },
+      { type: "h2", text: "You cannot control what you do not attribute" },
+      {
+        type: "p",
+        text: "Every model call should emit a usage record with the tenant, user, feature, route, model, input tokens, cached tokens, output tokens and computed cost. Write it to the same place you meter everything else, not only to the provider dashboard, which knows your API key but not your customers. Once that exists, the questions that matter become one query: cost per tenant per feature per day, and cost per successful outcome.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "final class MeteredLlmClient\n{\n    public function __construct(\n        private LlmClient $inner,\n        private UsageLedger $ledger,\n        private TenantBudget $budget,\n    ) {}\n\n    public function complete(Tenant $tenant, string $feature, Prompt $prompt): Completion\n    {\n        // Refuse before spending, not after.\n        if (! $this->budget->canSpend($tenant, $feature, $prompt->estimatedCost())) {\n            throw new BudgetExceeded($tenant->id, $feature);\n        }\n\n        $completion = $this->inner->complete($prompt);\n\n        $this->ledger->record(\n            tenantId: $tenant->id,\n            feature: $feature,\n            model: $completion->model,\n            inputTokens: $completion->usage->input,\n            cachedTokens: $completion->usage->cached,\n            outputTokens: $completion->usage->output,\n            costMicros: $completion->costMicros(),\n        );\n\n        return $completion;\n    }\n}",
+      },
+      { type: "h2", text: "Cache in layers" },
+      {
+        type: "ul",
+        items: [
+          "Provider prompt caching: put the stable parts of the prompt — system instructions, tool definitions, reference documents — first and the variable parts last. Cached input tokens are billed at a fraction of the normal rate, and this is often the single biggest saving for no behaviour change.",
+          "Exact response caching: for deterministic tasks such as classification or extraction of an unchanged document, key on a hash of the normalised input, model and prompt version. Invalidate on prompt version change, not on a clock.",
+          "Precompute instead of recompute: summaries of a document that is read a hundred times should be generated once at write time, not per view.",
+        ],
+      },
+      { type: "h2", text: "Budgets that degrade, not explode" },
+      {
+        type: "p",
+        text: "A per-tenant budget is a product decision expressed in code: how much this customer's plan includes, and what happens at the limit. Hard-failing at 100% is rarely right. A better shape is a soft limit at 80% that alerts the account owner, then at the limit a degraded mode — a smaller model, a shorter context, or queuing non-interactive work until the next window — and only a hard stop for clearly abusive patterns. Write the degraded behaviour down with the product manager before launch; deciding it during an incident produces bad answers.",
+      },
+      {
+        type: "p",
+        text: "Also cap output tokens per call. A max output setting that matches the task is free insurance against a prompt regression that makes the model ramble, and rambling is billed at the most expensive rate.",
+      },
+      {
+        type: "quote",
+        text: "If you cannot answer 'what did tenant X cost us on feature Y last week' in one query, you are not running a feature. You are running an experiment with an open-ended bill.",
+      },
+      {
+        type: "p",
+        text: "None of this requires a platform team. A metered client wrapper, a usage table, a budget check, a cache with versioned keys, and one dashboard sorted by cost per tenant. Build it in the first sprint and every later conversation about pricing is grounded in numbers rather than invoices.",
+      },
+    ],
+  },
+  {
+    slug: "running-a-customer-pilot-as-an-fde",
+    title: "Running a Customer Pilot as an FDE: Scope, Success Criteria, Handover",
+    description:
+      "Pilots fail by drifting, not by crashing. How to scope one tightly, agree measurable success criteria up front, run it on real data, and hand it over so it survives your departure.",
+    date: "2026-09-21",
+    readingTime: "8 min read",
+    category: "Engineering",
+    tags: ["Forward Deployed Engineer", "Customer Success", "Delivery", "Pilots", "Careers"],
+    content: [
+      {
+        type: "p",
+        text: "A pilot that ends with 'they liked it, we will follow up' has failed, politely. Nobody decided anything, the customer's team has moved on to their next priority, and the code you wrote on their data is sitting in a branch. Most pilots die this way rather than through a technical failure, and almost all of the causes are visible in the first week if you know to look.",
+      },
+      { type: "h2", text: "Scope one workflow, not a platform" },
+      {
+        type: "p",
+        text: "The customer will describe everything they eventually want. Your job in the first meeting is to find the one workflow that is painful, frequent, owned by a named person, and measurable today. 'Reduce time to triage inbound support tickets for the EMEA team' is a pilot. 'Use AI across customer operations' is a strategy deck. Write the scope down as a single paragraph and get the sponsor to agree to it in writing — including the list of things explicitly out of scope.",
+      },
+      { type: "h2", text: "Agree the success criteria before writing code" },
+      {
+        type: "ul",
+        items: [
+          "A baseline measured now: how long the workflow takes, how often it goes wrong, what it costs. Without a baseline, every result is an opinion.",
+          "A target that the sponsor, not you, says would justify buying: 'triage time under ten minutes for 80% of tickets'.",
+          "The data and access needed, with a named owner and a date for each. Access delays are the most common reason pilots overrun.",
+          "A decision date and the person who makes the decision. If nobody is named, there is no decision.",
+        ],
+      },
+      { type: "h2", text: "Run it on real data, with real users, early" },
+      {
+        type: "p",
+        text: "Demo data hides every problem that matters: the scanned PDFs, the free-text field used for three different purposes, the integration that times out at month-end. Get a sample of production data in week one, even if it is a read-only export, and get two real users on a rough version by week two. Their reaction to an ugly working thing is worth more than any stakeholder's reaction to a polished mock-up.",
+      },
+      {
+        type: "p",
+        text: "Send a short written update every week: what shipped, the current numbers against the baseline, what is blocked and who can unblock it. It keeps the sponsor engaged, and it becomes the evidence pack for the decision meeting.",
+      },
+      {
+        type: "quote",
+        text: "The pilot is not the software. The pilot is a decision the customer makes on a date, based on numbers they agreed to in advance.",
+      },
+      { type: "h2", text: "Hand over as if you will not be back" },
+      {
+        type: "p",
+        text: "Whatever the outcome, leave behind a handover that the customer's team and your product team can act on without you: how it is deployed, how to run it, what the known limitations are, which pieces were pilot shortcuts that must not go to production, and what you learned that the product should absorb. That last part is the forward deployed engineer's real output — the pilot wins one customer, the learnings shape the product for the next fifty.",
+      },
+    ],
+  },
+  {
+    slug: "postgres-locks-on-large-tables",
+    title: "Postgres Locks on Large Tables: lock_timeout, CONCURRENTLY, NOT VALID",
+    description:
+      "The schema change itself is often instant. The outage comes from the lock queue behind it. Postgres-specific techniques for changing big, busy tables without stalling every query in the application.",
+    date: "2026-09-22",
+    readingTime: "9 min read",
+    category: "System Design",
+    tags: ["PostgreSQL", "Migrations", "Locking", "Databases", "Reliability"],
+    content: [
+      {
+        type: "p",
+        text: "The incident always looks the same. Someone runs a migration that adds a nullable column — an operation that is effectively instant in modern Postgres — and the whole application stops responding for forty seconds. The ALTER itself was not slow. It was waiting for an ACCESS EXCLUSIVE lock behind a long-running analytics query, and every ordinary SELECT that arrived after it queued behind the ALTER. The lock queue, not the change, took production down.",
+      },
+      { type: "h2", text: "Always set lock_timeout" },
+      {
+        type: "p",
+        text: "The single most effective habit is to set a short lock_timeout for every migration session. If the lock cannot be acquired within a couple of seconds, the migration fails fast instead of becoming the head of a queue that blocks everything. A failed migration that you retry at a quieter moment is an annoyance. A migration that waits is an outage.",
+      },
+      {
+        type: "code",
+        lang: "sql",
+        code: "-- Fail fast instead of queueing every query behind us.\nSET lock_timeout = '3s';\nSET statement_timeout = '15min';\n\n-- 1. Index without blocking writes (cannot run inside a transaction).\nCREATE INDEX CONCURRENTLY IF NOT EXISTS idx_orders_tenant_created\n    ON orders (tenant_id, created_at);\n\n-- 2. Add the constraint without scanning the table under a heavy lock...\nALTER TABLE orders\n    ADD CONSTRAINT orders_customer_fk\n    FOREIGN KEY (customer_id) REFERENCES customers (id) NOT VALID;\n\n-- 3. ...then validate with a lock that still allows reads and writes.\nALTER TABLE orders VALIDATE CONSTRAINT orders_customer_fk;",
+      },
+      { type: "h2", text: "Know which operations rewrite or scan" },
+      {
+        type: "ul",
+        items: [
+          "Adding a column with a constant default is metadata-only since Postgres 11. Adding one with a volatile default such as random() still rewrites the table.",
+          "Changing a column type usually rewrites the table. Widening varchar or dropping a length limit generally does not; changing int to bigint does.",
+          "SET NOT NULL scans the whole table under an exclusive lock. Add a CHECK (col IS NOT NULL) NOT VALID constraint, validate it, and then SET NOT NULL — Postgres 12 and later uses the validated constraint to skip the scan.",
+          "A plain CREATE INDEX blocks writes for its whole duration. CONCURRENTLY does not, but it can fail and leave an INVALID index behind, which you must drop and retry.",
+        ],
+      },
+      { type: "h2", text: "Framework migrations need a little help" },
+      {
+        type: "p",
+        text: "Laravel and most ORMs wrap each migration in a transaction, and CREATE INDEX CONCURRENTLY refuses to run inside one. In Laravel, set the migration's $withinTransaction property to false for those files and keep them to a single statement each, so a failure leaves nothing half-applied. Review the generated SQL with the migrate --pretend option before merging; framework helpers occasionally emit a type change you did not intend.",
+      },
+      {
+        type: "quote",
+        text: "On a busy table the question is never 'how long does this ALTER take'. It is 'what is waiting behind it while it waits'.",
+      },
+      {
+        type: "p",
+        text: "Before running anything against a large table, check pg_stat_activity for long-running transactions and idle-in-transaction sessions; they are the usual blockers. And have the rollback plan written down: for most of these operations, recovery is forward — drop the invalid index, drop the NOT VALID constraint — rather than a down migration nobody has tested.",
+      },
+    ],
+  },
+  {
+    slug: "tenant-scoping-that-cant-be-forgotten",
+    title: "Tenant Scoping That Can't Be Forgotten: Global Scopes, RLS, and Tests",
+    description:
+      "Cross-tenant data leaks rarely come from the architecture. They come from one query that forgot a where clause. Layering Laravel global scopes, database row-level security, and tests so that forgetting is hard.",
+    date: "2026-09-23",
+    readingTime: "9 min read",
+    category: "Laravel",
+    tags: ["Laravel", "Multi-Tenancy", "Security", "PostgreSQL", "Testing"],
+    content: [
+      {
+        type: "p",
+        text: "In a shared-database multi-tenant application, every query that touches tenant data must filter by tenant. The architecture decision is easy. The hard part is that the rule must hold for every query written by every engineer for the life of the product, including the raw report query written at 6pm on a Friday and the queued job that runs with no authenticated user. One forgotten where clause is a data breach with your customer's name on it.",
+      },
+      {
+        type: "p",
+        text: "So the goal is not to remember. It is to make the safe path the default and the unsafe path loud.",
+      },
+      { type: "h2", text: "Layer one: a global scope that fails closed" },
+      {
+        type: "p",
+        text: "A global scope adds the tenant filter to every Eloquent query on the model. The important detail is what it does when there is no current tenant. A scope that silently skips the filter when the tenant is null turns every console command and queued job into a cross-tenant query. Make it throw instead, and require an explicit, greppable opt-out for the rare legitimate cross-tenant case.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "final class TenantScope implements Scope\n{\n    public function apply(Builder $builder, Model $model): void\n    {\n        $tenantId = app(CurrentTenant::class)->id();\n\n        // Fail closed: no tenant context means no query, not every row.\n        if ($tenantId === null) {\n            throw new MissingTenantContext($model::class);\n        }\n\n        $builder->where($model->qualifyColumn('tenant_id'), $tenantId);\n    }\n}\n\ntrait BelongsToTenant\n{\n    protected static function bootBelongsToTenant(): void\n    {\n        static::addGlobalScope(new TenantScope());\n\n        static::creating(function (Model $model) {\n            $model->tenant_id ??= app(CurrentTenant::class)->id()\n                ?? throw new MissingTenantContext($model::class);\n        });\n    }\n}",
+      },
+      {
+        type: "p",
+        text: "Queued jobs must carry the tenant ID in their payload and restore the context in middleware before handle() runs. Never rely on whatever tenant the worker process happened to serve last; long-running Octane and Horizon workers make that bug intermittent and therefore very hard to spot.",
+      },
+      { type: "h2", text: "Layer two: row-level security in the database" },
+      {
+        type: "p",
+        text: "Global scopes do not cover DB::table, raw SQL, or a reporting tool connected directly to the database. Postgres row-level security does. Set the tenant ID as a session variable at the start of each request or job, enable RLS on tenant tables with a policy comparing tenant_id to that variable, and connect the application as a role that is not the table owner, since owners bypass RLS by default. Now a forgotten filter returns nothing instead of everything.",
+      },
+      {
+        type: "code",
+        lang: "sql",
+        code: "ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;\nALTER TABLE invoices FORCE ROW LEVEL SECURITY;\n\nCREATE POLICY tenant_isolation ON invoices\n    USING (tenant_id = current_setting('app.tenant_id')::bigint)\n    WITH CHECK (tenant_id = current_setting('app.tenant_id')::bigint);",
+      },
+      { type: "h2", text: "Layer three: tests that try to cross the boundary" },
+      {
+        type: "ul",
+        items: [
+          "For every tenant-owned resource endpoint, a test that authenticates as tenant A and requests tenant B's record by ID, asserting a 404 rather than a 403, so you do not confirm the record exists.",
+          "An architecture test that fails if a model with a tenant_id column does not use the BelongsToTenant trait.",
+          "A test that dispatches each tenant-aware job without tenant context and asserts it refuses to run.",
+        ],
+      },
+      {
+        type: "quote",
+        text: "Tenant isolation that depends on every engineer remembering a where clause is not isolation. It is a streak, and streaks end.",
+      },
+      {
+        type: "p",
+        text: "Three layers sounds heavy, but each covers a different hole: the scope catches the everyday ORM query, RLS catches the raw SQL and the direct connection, and the tests catch the regression before it ships. Together they move tenant safety from a code review checklist item to a property of the system.",
+      },
+    ],
+  },
+  {
+    slug: "reading-production-from-logs-and-traces",
+    title: "Reading Production From Logs and Traces Alone",
+    description:
+      "You cannot attach a debugger to a customer's bad afternoon. A practical method for reconstructing what happened from telemetry: anchor on one request, widen carefully, and know what your instrumentation cannot tell you.",
+    date: "2026-09-24",
+    readingTime: "8 min read",
+    category: "Engineering",
+    tags: ["Observability", "Debugging", "Logging", "Distributed Tracing", "Production"],
+    content: [
+      {
+        type: "p",
+        text: "The report arrives two days late: 'Some of our users could not submit orders on Tuesday afternoon.' You cannot reproduce it, the code has been deployed twice since, and the only evidence is whatever your logs, traces and metrics captured at the time. Reading production from telemetry is a distinct skill from debugging locally, and it rewards method over intuition.",
+      },
+      { type: "h2", text: "Anchor on one concrete request" },
+      {
+        type: "p",
+        text: "Resist starting from dashboards. Aggregates tell you something was wrong; they rarely tell you what. Ask the customer for one specific example — a user, an approximate time, an order reference, a screenshot with the clock visible — and find that exact request. From its request ID or trace ID you get the full path: which service handled it, which queries ran, which downstream call failed and with what status.",
+      },
+      {
+        type: "code",
+        lang: "sql",
+        code: "-- Find the anchor request, then everything that shares its trace.\nSELECT timestamp, service, level, message, attributes\nFROM logs\nWHERE timestamp BETWEEN '2026-09-22 13:00' AND '2026-09-22 16:00'\n  AND attributes['tenant_id'] = '4182'\n  AND attributes['route'] = 'POST /orders'\n  AND level IN ('warn', 'error')\nORDER BY timestamp\nLIMIT 50;\n\n-- Then: WHERE trace_id = '<trace id from the row above>'",
+      },
+      { type: "h2", text: "Widen one dimension at a time" },
+      {
+        type: "ul",
+        items: [
+          "Same error, other users: is it one tenant, one region, one app version, one browser? Group the failures by each attribute in turn and look for the one that splits cleanly.",
+          "Same user, before and after: what did their successful requests look like an hour earlier? The difference is often the clue.",
+          "Same time, other systems: what else changed in that window — a deploy, a config flag, a scheduled job, a provider status incident?",
+        ],
+      },
+      {
+        type: "p",
+        text: "Write down the timeline as you go, with timestamps and the evidence for each line. It keeps you honest about what you know versus what you suspect, and it becomes the customer explanation and the postmortem without extra work.",
+      },
+      { type: "h2", text: "Know the shape of your blind spots" },
+      {
+        type: "p",
+        text: "Absence of evidence is only evidence if the instrumentation would have recorded the thing. Sampled traces may simply have dropped the failing request. Logs below the configured level were never written. A client-side failure — a JavaScript error, a CORS rejection, a mobile app that never sent the request — leaves nothing on the server at all. Before concluding 'it never reached us', confirm that a request like it would have been visible if it had.",
+      },
+      {
+        type: "quote",
+        text: "Every incident investigation ends with a list of things you wished you had logged. That list is the most valuable output — act on it.",
+      },
+      {
+        type: "p",
+        text: "The follow-up is the part teams skip: add the missing attribute, keep error traces unsampled, log the decision a code path made rather than only that it ran. Each investigation should make the next one shorter.",
+      },
+    ],
+  },
+  {
+    slug: "laravel-batches-and-chains",
+    title: "Laravel Batches and Chains: Coordinating Multi-Step Jobs",
+    description:
+      "Real background work has steps, dependencies and partial failures. When to use chains, when to use batches, how to combine them, and how to keep a long-running process observable and safe to retry.",
+    date: "2026-09-25",
+    readingTime: "8 min read",
+    category: "Laravel",
+    tags: ["Laravel", "Queues", "Horizon", "Background Jobs", "Reliability"],
+    content: [
+      {
+        type: "p",
+        text: "A single queued job is easy. The trouble starts with processes: import a file, then validate ten thousand rows in parallel, then generate a report, then email the user — and if row validation fails for a few rows, the report should still go out with the errors listed. Gluing that together with jobs that dispatch other jobs works until something fails in the middle and nobody can tell what state the process is in.",
+      },
+      { type: "h2", text: "Chains for order, batches for fan-out" },
+      {
+        type: "p",
+        text: "A chain runs jobs sequentially and stops at the first failure. Use it when each step depends on the previous one. A batch runs jobs in parallel and tracks the group: total, pending, failed, and callbacks when everything finishes. Use it when the work is many independent units. Most real processes are a chain with a batch in the middle, and Laravel lets you nest them directly.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "$import = Import::create(['tenant_id' => $tenant->id, 'status' => 'pending']);\n\nBus::chain([\n    new StoreUploadedFile($import->id, $path),\n    Bus::batch(\n        $import->rowChunks(500)->map(fn ($chunk) => new ValidateRows($import->id, $chunk))\n    )\n        ->name(\"import:{$import->id}\")\n        ->allowFailures(),          // a bad chunk should not cancel the rest\n    new BuildImportReport($import->id),\n    new NotifyImportOwner($import->id),\n])\n    ->catch(fn (Throwable $e) => $import->markFailed($e->getMessage()))\n    ->onQueue('imports')\n    ->dispatch();",
+      },
+      { type: "h2", text: "Rules that keep it safe" },
+      {
+        type: "ul",
+        items: [
+          "Pass IDs, not models or large arrays. Payloads are serialised into Redis or the database; a chunk of 500 full rows per job adds up quickly. Load the data inside handle().",
+          "Make every step idempotent. Jobs are delivered at least once. A retried ValidateRows should upsert results keyed by row number, not append duplicates.",
+          "Check $this->batch()->cancelled() at the start of batched jobs so that cancelling an import actually stops the remaining work.",
+          "Store the process state on your own model as well as in the batch table. The job_batches table is pruned; the customer's import record is not.",
+          "Use allowFailures deliberately. Without it, one failed job cancels the batch, which is right for all-or-nothing work and wrong for imports.",
+        ],
+      },
+      { type: "h2", text: "Make it visible" },
+      {
+        type: "p",
+        text: "The batch exposes progress as a percentage, which is enough for a progress bar polled by the front end. For operations, give the batch a meaningful name that includes the domain ID so a stuck batch in Horizon can be traced back to the customer who is waiting on it. And prune the job_batches table on a schedule with queue:prune-batches; it grows forever otherwise.",
+      },
+      {
+        type: "quote",
+        text: "If you cannot answer 'what step is this customer's import on, and why' from one screen, the process is not finished — only the happy path is.",
+      },
+    ],
+  },
+  {
+    slug: "backpressure-saying-no-before-falling-over",
+    title: "Backpressure: Saying No Before the System Falls Over",
+    description:
+      "Systems rarely fail from too little capacity alone. They fail by accepting work they cannot finish. Bounded queues, load shedding, and admission control that keep a service useful under overload.",
+    date: "2026-09-26",
+    readingTime: "8 min read",
+    category: "Distributed Systems",
+    tags: ["Distributed Systems", "Backpressure", "Load Shedding", "Resilience", "Queues"],
+    content: [
+      {
+        type: "p",
+        text: "Under overload, a service that accepts every request ends up serving none of them well. Latency climbs, clients time out and retry, the retries add load, and the queue in front of the workers grows until every request in it is already too old to be useful. The failure is not that there was too much work. It is that the system kept saying yes to work it could not complete.",
+      },
+      {
+        type: "p",
+        text: "Backpressure is the set of mechanisms that let a component signal 'slow down' upstream, and load shedding is what you do when upstream does not listen. Both are about choosing which work to fail, quickly and cheaply, instead of failing all of it slowly.",
+      },
+      { type: "h2", text: "Every queue needs a bound" },
+      {
+        type: "p",
+        text: "An unbounded queue converts an overload into a latency problem and then into a memory problem. Put a bound on in-memory queues, worker pools and connection pools, and decide explicitly what happens when the bound is reached: block the producer, reject with a clear error, or drop the oldest item. For interactive requests, rejecting fast with a 503 and a Retry-After header is almost always better than accepting work that will finish after the user gave up.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "import asyncio\n\nclass AdmissionControl:\n    \"\"\"Cap in-flight work; reject the rest immediately.\"\"\"\n\n    def __init__(self, max_in_flight: int, max_wait_s: float):\n        self._sem = asyncio.Semaphore(max_in_flight)\n        self._max_wait_s = max_wait_s\n\n    async def __aenter__(self):\n        try:\n            await asyncio.wait_for(self._sem.acquire(), timeout=self._max_wait_s)\n        except asyncio.TimeoutError:\n            raise Overloaded(retry_after_s=1)   # becomes a 503 at the edge\n        return self\n\n    async def __aexit__(self, *exc):\n        self._sem.release()\n\nadmission = AdmissionControl(max_in_flight=200, max_wait_s=0.05)\n\nasync def handle(request):\n    async with admission:\n        return await process(request)",
+      },
+      { type: "h2", text: "Shed the right work" },
+      {
+        type: "ul",
+        items: [
+          "Prioritise by value: checkout and login before recommendations and analytics beacons. Tag requests with a priority at the edge and shed the lowest tier first.",
+          "Drop work whose deadline has passed. If the client's timeout has expired, finishing the request only spends capacity on a response nobody will read. Propagate deadlines and check them before expensive steps.",
+          "Prefer LIFO under overload for some queues: the newest request still has a waiting user; the oldest probably does not.",
+          "Shed per tenant, not only globally, so one customer's burst does not consume everyone's capacity.",
+        ],
+      },
+      { type: "h2", text: "Close the loop with clients" },
+      {
+        type: "p",
+        text: "Backpressure only works if callers respond to it. Clients should treat a 429 or 503 as a signal to back off with jitter, honour Retry-After, and keep a retry budget so that retries never exceed a small fraction of normal traffic. For queue consumers, the equivalent is pulling at the rate you can process rather than having work pushed at you — which is why pull-based consumers degrade more gracefully than webhook receivers.",
+      },
+      {
+        type: "quote",
+        text: "A fast 'no' is a feature. A slow 'yes' that times out is an outage that also burns your capacity.",
+      },
+    ],
+  },
+  {
+    slug: "secrets-rotation-without-the-outage",
+    title: "Secrets Rotation Without the 2 a.m. Outage",
+    description:
+      "Most teams do not rotate secrets because the last rotation broke production. Designing for dual credentials, short-lived tokens and automated rotation so that changing a secret becomes boring.",
+    date: "2026-09-27",
+    readingTime: "8 min read",
+    category: "Security",
+    tags: ["Security", "Secrets Management", "Rotation", "DevOps", "Cloud"],
+    content: [
+      {
+        type: "p",
+        text: "Ask a team when they last rotated their database password or their payment provider's API key and the honest answer is often 'when we set it up'. The reason is rarely ignorance. It is that the last rotation caused an outage: a worker kept the old value cached, a cron box had it in a file nobody remembered, and the switch was a single atomic change with no overlap. So rotation became something to avoid, and a leaked credential became valid indefinitely.",
+      },
+      { type: "h2", text: "Rotation needs an overlap window" },
+      {
+        type: "p",
+        text: "The core design rule is that, for some period, both the old and the new credential must be valid. Without overlap, every consumer has to switch at exactly the same instant, which never happens in a system with caches, long-lived processes and deploys in flight. With overlap, rotation becomes four unhurried steps: create the new credential, distribute it, confirm nobody uses the old one, revoke the old one.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Databases: use two users and alternate between them, or a secrets manager that creates a new user per rotation.",
+          "Third-party API keys: most providers allow two active keys at once. If yours does not, raise it with them — it is a reasonable ask for any integration that handles money or personal data.",
+          "Signing keys for webhooks or JWTs: publish the new key and accept signatures from both during the window; sign with the new one only after verifiers have it.",
+        ],
+      },
+      { type: "h2", text: "Make 'is the old one still used' answerable" },
+      {
+        type: "p",
+        text: "The step teams skip is verification. Before revoking, you need evidence that nothing still presents the old credential: database connection logs by user, the provider's last-used timestamp for the key, verification metrics tagged by key ID. If you cannot answer that question, the revocation is a guess, and a guess at 2 a.m. is how the outage happens.",
+      },
+      {
+        type: "code",
+        lang: "php",
+        code: "// Verify incoming webhooks against every active secret, newest first,\n// and record which one matched so the old one can be retired safely.\nfunction verifySignature(string $payload, string $signature, array $secrets): ?string\n{\n    foreach ($secrets as $keyId => $secret) {\n        $expected = hash_hmac('sha256', $payload, $secret);\n        if (hash_equals($expected, $signature)) {\n            Metrics::increment('webhook.signature.verified', ['key_id' => $keyId]);\n            return $keyId;\n        }\n    }\n    return null;\n}",
+      },
+      { type: "h2", text: "Prefer credentials that expire on their own" },
+      {
+        type: "p",
+        text: "The best rotation is the one you never perform. Workload identity, IAM roles, and short-lived tokens issued per deploy or per hour remove the long-lived secret entirely. Where a static secret remains, load it from a secrets manager at runtime rather than baking it into images or environment files, and make sure long-running processes re-read it on a schedule or on signal rather than only at boot.",
+      },
+      {
+        type: "quote",
+        text: "If rotating a secret is scary, the secret is already a liability. Practise the rotation until it is boring, then automate it.",
+      },
+      {
+        type: "p",
+        text: "Start with one credential: write the runbook, perform the rotation in office hours, note every place that broke, and fix those places. The second rotation is faster. By the fourth, it belongs in a scheduled job — and the day a key leaks, you revoke it in minutes instead of opening a war room.",
+      },
+    ],
+  },
+  {
+    slug: "document-parsing-for-rag",
+    title: "Document Parsing for RAG: PDFs, Tables, and the Ingestion Nobody Budgets For",
+    description:
+      "Retrieval quality is capped by what ingestion extracted. The unglamorous work of parsing PDFs, tables, scans and layouts — and how to measure it before blaming the embedding model.",
+    date: "2026-09-28",
+    readingTime: "9 min read",
+    category: "Artificial Intelligence",
+    tags: ["RAG", "Document Parsing", "LLM", "Data Engineering", "Production AI"],
+    content: [
+      {
+        type: "p",
+        text: "When a RAG system gives a wrong answer, the team usually reaches for the retrieval knobs: a different embedding model, a reranker, a bigger top-k. In the enterprise deployments I have worked on, the root cause was more often upstream. The answer was in a table that the PDF extractor flattened into a stream of numbers, or in a scanned appendix that produced no text at all, or split across a page break with a running header in the middle. Retrieval cannot find what ingestion destroyed.",
+      },
+      { type: "h2", text: "Know what you are ingesting" },
+      {
+        type: "p",
+        text: "Before choosing tools, profile the corpus. Count documents by type and by origin: born-digital PDFs, scanned PDFs, Word files, spreadsheets, slide decks, HTML exports from a wiki. Each needs a different path, and the distribution decides where to spend effort. A corpus that is 70% scanned contracts is an OCR project with a little RAG attached, not the other way round.",
+      },
+      {
+        type: "ul",
+        items: [
+          "Born-digital PDFs: text extraction works, but reading order and multi-column layouts break naive extractors. Use a layout-aware parser.",
+          "Scans: OCR with layout detection; keep the confidence score and flag low-confidence pages rather than indexing garbage silently.",
+          "Tables: extract them as structured tables and render each to Markdown or as row-wise sentences that carry the column headers. A row without its headers is meaningless to an embedding.",
+          "Spreadsheets: often better served by a query tool over the data than by chunking cells into text.",
+        ],
+      },
+      { type: "h2", text: "Chunk by structure, carry the context" },
+      {
+        type: "p",
+        text: "Split on the document's own structure — headings, sections, clauses, table boundaries — rather than a fixed character count, and strip repeated headers, footers and page numbers first. Then prepend each chunk with the context it lost when cut out: document title, section path, and for contracts or policies the clause number. A chunk that reads 'The notice period is 90 days' is useless without knowing which agreement and which party it belongs to.",
+      },
+      {
+        type: "code",
+        lang: "python",
+        code: "def to_chunks(doc: ParsedDocument, max_tokens: int = 500) -> list[Chunk]:\n    chunks = []\n    for section in doc.sections():                 # from the layout parser\n        breadcrumb = ' > '.join([doc.title, *section.heading_path])\n        for block in section.blocks:\n            if block.kind == 'table':\n                # Keep tables whole; repeat headers if a table must be split.\n                for part in block.split_rows(max_tokens, repeat_header=True):\n                    chunks.append(Chunk(f'{breadcrumb}\\n\\n{part.to_markdown()}',\n                                        meta={'page': part.page, 'kind': 'table'}))\n            else:\n                for text in split_by_sentences(block.text, max_tokens):\n                    chunks.append(Chunk(f'{breadcrumb}\\n\\n{text}',\n                                        meta={'page': block.page, 'kind': 'text'}))\n    return chunks",
+      },
+      { type: "h2", text: "Measure ingestion separately" },
+      {
+        type: "p",
+        text: "Build a small ingestion eval: twenty to fifty representative documents with known facts, including the awkward ones — the table, the footnote, the scanned page. For each, check that the fact appears intact in some chunk. That is a cheap, deterministic test, and it separates 'ingestion lost it' from 'retrieval missed it' — two failures that look identical in the final answer but need completely different fixes.",
+      },
+      {
+        type: "quote",
+        text: "Retrieval quality has a ceiling, and ingestion sets it. No reranker recovers a table that the parser turned into soup.",
+      },
+      {
+        type: "p",
+        text: "Budget for this work explicitly. In most RAG projects, ingestion is a third or more of the effort, and it is the part demos skip because the demo corpus was three clean Markdown files.",
+      },
+    ],
+  },
+  {
+    slug: "blue-green-or-canary-on-kubernetes",
+    title: "Blue-Green or Canary on Kubernetes: Picking a Rollout Strategy",
+    description:
+      "Rolling updates are the default, not always the right choice. When blue-green, canary or plain rolling deploys fit, what each costs, and the database and session problems that decide it for you.",
+    date: "2026-09-29",
+    readingTime: "8 min read",
+    category: "Cloud",
+    tags: ["Kubernetes", "Deployments", "Canary", "Blue-Green", "SRE"],
+    content: [
+      {
+        type: "p",
+        text: "Kubernetes gives you rolling updates out of the box, and for many services that is enough: pods are replaced a few at a time, readiness probes gate traffic, and a bad image stalls the rollout. The question of blue-green versus canary comes up when rolling is not enough — when a bad release must be undone in seconds, or when you need evidence from real traffic before committing everyone to a change.",
+      },
+      { type: "h2", text: "What each strategy buys you" },
+      {
+        type: "ul",
+        items: [
+          "Rolling: no extra capacity, gradual replacement, but old and new versions serve traffic together for the whole rollout and rollback is another rollout.",
+          "Blue-green: a full copy of the new version runs alongside the old; traffic switches at once and switches back at once. Fast, clean rollback, at the cost of double capacity during the deploy.",
+          "Canary: a small slice of traffic goes to the new version, metrics are compared against the stable version, and the slice grows only while the comparison stays healthy. The best protection against subtle regressions, and the most machinery.",
+        ],
+      },
+      { type: "h2", text: "The database decides more than the cluster" },
+      {
+        type: "p",
+        text: "Every strategy except a stop-the-world deploy runs two versions of the application against one database at some point. Blue-green does not escape this: rollback means the old version reads data the new version wrote. So the real prerequisite for any of them is backward-compatible schema changes — expand, deploy, contract — and payloads that both versions can read. Teams that adopt canaries without that discipline discover that the 5% slice corrupted rows the 95% cannot parse.",
+      },
+      {
+        type: "code",
+        lang: "yaml",
+        code: "apiVersion: argoproj.io/v1alpha1\nkind: Rollout\nmetadata:\n  name: orders-api\nspec:\n  strategy:\n    canary:\n      steps:\n        - setWeight: 5\n        - analysis:\n            templates: [{ templateName: error-rate-and-p95 }]\n        - setWeight: 25\n        - pause: { duration: 10m }\n        - analysis:\n            templates: [{ templateName: error-rate-and-p95 }]\n        - setWeight: 100\n      # Abort automatically and shift traffic back if analysis fails.\n      abortScaleDownDelaySeconds: 30",
+      },
+      { type: "h2", text: "How I choose" },
+      {
+        type: "p",
+        text: "For internal services with good tests and low traffic, rolling updates with sensible readiness probes and maxUnavailable set to zero. For a customer-facing service where a bad release is expensive and the main risk is a crash or obvious error, blue-green, because the rollback is instant and easy to reason about. For high-traffic services where the risk is subtle — a latency regression, a slightly higher error rate on one endpoint — canary with automated analysis, because only real traffic at scale shows those, and only a statistical comparison catches them before everyone is affected.",
+      },
+      {
+        type: "quote",
+        text: "A rollout strategy is only as good as the signal that decides to stop it. Without automated analysis, a canary is just a slower rolling update.",
+      },
+      {
+        type: "p",
+        text: "Whichever you pick, rehearse the rollback. The first time you trigger it should not be during an incident, and the fastest rollback in the world does not help if nobody on call knows the command.",
+      },
+    ],
+  },
+  {
+    slug: "leader-election-and-distributed-locks",
+    title: "Leader Election and Distributed Locks: Fencing Tokens or Bust",
+    description:
+      "A lock with a timeout can be held by two processes at once. Why distributed locks fail under pauses and partitions, how fencing tokens make the resource enforce safety, and when you need neither.",
+    date: "2026-09-30",
+    readingTime: "9 min read",
+    category: "Distributed Systems",
+    tags: ["Distributed Systems", "Locking", "Leader Election", "Redis", "Consistency"],
+    content: [
+      {
+        type: "p",
+        text: "The requirement sounds simple: only one worker should run the billing job at a time, or only one replica should consume from this partition. The usual implementation is a lock in Redis or the database with an expiry, so that a crashed holder does not block everyone forever. And that implementation has a hole: the expiry that protects you from crashes also allows two holders at once.",
+      },
+      { type: "h2", text: "How a lock with a timeout fails" },
+      {
+        type: "p",
+        text: "Worker A acquires the lock with a 30 second TTL and starts writing. A long garbage collection pause, a slow disk, or a network stall freezes it for 40 seconds. The lock expires. Worker B acquires it and starts writing. Worker A wakes up, still believing it holds the lock, and completes its write — over the top of B's. Nothing in A's code was wrong. A process simply cannot know how much time passed while it was paused.",
+      },
+      {
+        type: "p",
+        text: "Checking 'do I still hold the lock' before writing does not fix this; the pause can happen between the check and the write. The lock service alone cannot make this safe. The protected resource has to participate.",
+      },
+      { type: "h2", text: "Fencing tokens" },
+      {
+        type: "p",
+        text: "Each time the lock is granted, issue a number that strictly increases. The holder sends that token with every write, and the resource rejects any write carrying a token lower than the highest it has already seen. When A wakes up with token 33 after B has written with token 34, A's write is refused. Safety now lives in the place that matters — the data — rather than in a timing assumption.",
+      },
+      {
+        type: "code",
+        lang: "sql",
+        code: "-- The resource enforces the fence: stale holders cannot overwrite.\nUPDATE billing_runs\nSET    status = 'completed',\n       result = :result,\n       fence_token = :token\nWHERE  run_date = :run_date\n  AND  fence_token < :token;\n\n-- 0 rows affected => a newer holder has taken over; abort without side effects.",
+      },
+      { type: "h2", text: "Often you need neither" },
+      {
+        type: "ul",
+        items: [
+          "If the job is idempotent — keyed by date, upserting results — two concurrent runs waste work but do not corrupt anything. That is usually cheaper than correct locking.",
+          "If the work lives in one database, a row lock with SELECT ... FOR UPDATE SKIP LOCKED, or a Postgres advisory lock held inside the transaction, ties the lock's lifetime to the transaction and avoids expiry problems.",
+          "For consumers, let the platform do it: Kafka consumer groups and Kubernetes leader election via Lease objects already handle membership, but still fence writes if a stale leader could do damage.",
+          "Laravel's withoutOverlapping and onOneServer are fine for 'do not waste effort running this twice'. They are not a correctness guarantee for anything that must never run concurrently.",
+        ],
+      },
+      {
+        type: "quote",
+        text: "A distributed lock is an efficiency optimisation. If running twice would be a correctness bug, the resource has to reject the second writer — usually with a fencing token.",
+      },
+      {
+        type: "p",
+        text: "So ask two questions before reaching for a lock. What happens if this runs twice at the same time? If the answer is 'some wasted work', use a simple lock and idempotent writes. If the answer is 'corrupted data or a double charge', use a fencing token, or move the coordination into a database transaction where the guarantee is real.",
+      },
+    ],
+  },
 ];
 
 export function getPost(slug: string): BlogPost | undefined {
